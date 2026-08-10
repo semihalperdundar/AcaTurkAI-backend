@@ -1,0 +1,13 @@
+# Anaconda/conda ortami - VS Code'da bu projeyi calistirmak icin.
+# Kurulum:  conda env create -f environment.yml
+# Guncelleme: conda env update -f environment.yml --prune
+# Aktiflestirme: conda activate acaturkai
+name: acaturkai
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - -r requirements.txt
