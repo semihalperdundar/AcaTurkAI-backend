@@ -26,6 +26,7 @@ from sqlalchemy import (
     JSON,
     String,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -51,7 +52,7 @@ class Author(Base):
     full_name: Mapped[str | None] = mapped_column(String(500))
     orcid: Mapped[str | None] = mapped_column(String(50))
     affiliation: Mapped[str | None] = mapped_column(String(500))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     works = relationship("WorkAuthor", back_populates="author")
 
@@ -99,7 +100,7 @@ class CorpusWork(Base):
     consent_given: Mapped[bool] = mapped_column(Boolean, default=False)
 
     raw_json: Mapped[dict | None] = mapped_column(JsonType)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     journal = relationship("Journal", back_populates="works")
     authors = relationship("WorkAuthor", back_populates="work")
@@ -138,4 +139,4 @@ class JournalQuartileHistory(Base):
     sjr_score: Mapped[float | None] = mapped_column(Float)
     category: Mapped[str | None] = mapped_column(String(255))
     area_mapping: Mapped[str | None] = mapped_column(String(50))  # 'education' | 'social_sciences' | ...
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

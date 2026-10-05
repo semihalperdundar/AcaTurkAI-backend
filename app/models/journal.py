@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import String, DateTime, Float, Integer, Boolean, JSON
+from sqlalchemy import String, DateTime, Float, Integer, Boolean, JSON, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -30,6 +30,6 @@ class Journal(Base):
     openalex_id: Mapped[str | None] = mapped_column(String(100))
     norm_profile: Mapped[dict | None] = mapped_column(JsonType)
     last_updated: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     works = relationship("CorpusWork", back_populates="journal")

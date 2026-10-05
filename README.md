@@ -90,16 +90,35 @@ pytest
 
 (Health-check testleri DB gerektirmez; auth/analiz testleri için Postgres'in ayakta olması gerekir.)
 
-## İlk migration'ı üretme
+## Migration
 
-Bu depo bilinçli olarak **boş bir `alembic/versions/` klasörüyle** teslim edildi — migration'ı
-kendi ortamınızdaki gerçek Postgres'e karşı üretmeniz önerilir (autogenerate, çalışan bir DB
-bağlantısı ister):
+İlk migration (`alembic/versions/d1f440167fdd_init_schema.py`, 11 tablo) mevcut. Yalnızca
+Postgres hedefler (`DEFAULT now()`, `JSONB`); testler migration değil `create_all` kullanır.
 
 ```bash
-alembic revision --autogenerate -m "init schema"
 alembic upgrade head
+# Gerçek Postgres'e karşı model/şema farkı kontrolü (boş revizyon çıkmalı):
+alembic revision --autogenerate -m "drift check"
 ```
+
+## Analiz Motoru v1 (`app/services/analysis/`)
+
+`run_analysis` task'ı → `analysis_service.process_analysis` → `engine.analyze_text`.
+
+| Modül | Kolon | Ölçülen |
+|---|---|---|
+| `modules/structure.py` | `score_structure` | IMRAD bölümleri (TR+EN başlıklar), sıra, kaynakça; `law` alanı IMRAD beklemez |
+| `modules/lexical.py` | `score_lexical` | MATTR (pencere 100), akademik kök yoğunluğu, aşırı tekrar |
+| `modules/delivery.py` | `score_delivery` | cümle uzunluğu ort./CV/uzun oranı, gayriresmî ton, geçiş ifadeleri |
+
+- Genel skor: ağırlıklı ortalama (0.40/0.30/0.30), `rejection_risk_score = 100 - overall`.
+- `full_report`: modül metrikleri + `editorial_board` (her modül bir hakem: verdict/summary/key_issues/confidence).
+  LLM hakemleri (Ay 2+) aynı `agent_review` şemasını doldurur.
+- Durum: `pending → processing → completed | failed`. Hata mesajı `full_report.error`;
+  `completed` kayıt yeniden gelirse atlanır (idempotent).
+- Bant eşikleri v1 sezgisel — corpus normları oluşunca alan bazlı kalibre edilecek.
+- Windows'ta local worker: `celery -A app.core.celery_app.celery_app worker --pool=solo --loglevel=info`
+  (prefork Windows'ta desteklenmez).
 
 ## Corpus Modülü (Akademik Referans Kütüphanesi entegrasyonu)
 
@@ -160,6 +179,6 @@ değişken gerekmedi.
 1. Google OAuth (`app/routers/auth.py` içindeki `google_oauth` stub'ı)
 2. S3/R2 dosya depolama (`app/services/analysis_service.py` VE `app/services/corpus_service.py`
    içindeki local disk yazımlarını değiştirin — ikisi de aynı S3/R2 client'ını paylaşmalı)
-3. Celery worker'ın gerçek bir görevi uçtan uca çalıştırması (şu an placeholder status günceller)
+3. ~~Celery worker'ın gerçek bir görevi uçtan uca çalıştırması~~ → Analiz Motoru v1 (3/11 modül) hazır
 4. Corpus tarafında: gerçek bir Scimago CSV + küçük ölçekli bir alan (örn. sadece Eğitim,
    2020-2024) ile uçtan uca deneme — doc'un Bölüm 14'te önerdiği gibi

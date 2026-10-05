@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import String, DateTime, Float, Integer, ForeignKey, JSON
+from sqlalchemy import String, DateTime, Float, Integer, ForeignKey, JSON, func
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -48,7 +48,7 @@ class Analysis(Base):
     status: Mapped[str] = mapped_column(String(50), default="pending")  # pending/processing/completed/failed
     processing_time_ms: Mapped[int | None] = mapped_column(Integer)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User", back_populates="analyses")
     versions = relationship("AnalysisVersion", back_populates="analysis")
@@ -64,7 +64,7 @@ class ThesisProject(Base):
     title: Mapped[str | None] = mapped_column(String(500))
     field: Mapped[str | None] = mapped_column(String(100))
     target_journal: Mapped[str | None] = mapped_column(String(255))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User", back_populates="thesis_projects")
     versions = relationship("AnalysisVersion", back_populates="project")
@@ -80,7 +80,7 @@ class AnalysisVersion(Base):
     analysis_id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("analyses.id"))
     version_number: Mapped[int | None] = mapped_column(Integer)
     notes: Mapped[str | None] = mapped_column(String)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     project = relationship("ThesisProject", back_populates="versions")
     analysis = relationship("Analysis", back_populates="versions")

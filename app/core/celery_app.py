@@ -33,22 +33,15 @@ def ping() -> str:
 @celery_app.task(name="acaturkai.run_analysis")
 def run_analysis(analysis_id: str) -> dict:
     """
-    Placeholder: gercek 11 modullu analiz motoru burada calisacak.
-    Su an sadece analiz kaydinin var oldugunu dogrulayip status gunceller.
-    Ay 2 kapsami: app.services.analysis_service icindeki gercek modulleri cagirmak.
+    Analiz motoru v1 (structure + lexical + delivery). Is mantigi
+    app.services.analysis_service.process_analysis icinde; task yalnizca session yonetir.
     """
     from app.database import SessionLocal
-    from app.models.analysis import Analysis
+    from app.services.analysis_service import process_analysis
 
     db = SessionLocal()
     try:
-        analysis = db.get(Analysis, analysis_id)
-        if analysis is None:
-            return {"status": "not_found", "analysis_id": analysis_id}
-        analysis.status = "processing"
-        db.commit()
-        # TODO (Ay 2): 11 modul analiz motorunu burada cagir, sonuclari yaz.
-        return {"status": "queued_placeholder", "analysis_id": analysis_id}
+        return process_analysis(db, analysis_id)
     finally:
         db.close()
 
