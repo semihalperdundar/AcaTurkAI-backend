@@ -9,9 +9,9 @@ channels:
 dependencies:
   - python=3.11
   - pip
-  # WeasyPrint conda-forge'dan: Pango/HarfBuzz/fontconfig DLL'leri (Windows dahil) birlikte gelir.
-  # Surumler requirements.txt ile ayni -> pip adimi bunlari yeniden kurmaz.
-  - weasyprint=62.3
-  - jinja2=3.1.4
+  # WeasyPrint'in sistem kutuphaneleri (Pango/HarfBuzz/fontconfig DLL'leri, Windows dahil).
+  # WeasyPrint'in kendisi requirements.txt'ten pip ile kurulur: conda-forge'da 63.0 yok
+  # (62.3 -> 65.1), 62.3 ise pydyf>=0.12 ile kirik (CI: 'super' object has no attribute 'transform').
+  - pango=1.58
   - pip:
       - -r requirements.txt
