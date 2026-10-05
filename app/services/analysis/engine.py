@@ -9,10 +9,22 @@ normalize edilir -> yeni modul eklendikce mevcut skorlar kirilmaz.
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from app.services.analysis.modules import abstract, delivery, lexical, methodology, references, structure, title
+from app.services.analysis.modules import (
+    abstract,
+    conclusions,
+    delivery,
+    findings,
+    lexical,
+    literature,
+    methodology,
+    originality,
+    references,
+    structure,
+    title,
+)
 from app.services.analysis.text_utils import ModuleResult, detect_language, split_sentences, tokenize, verdict_for
 
-ENGINE_VERSION = "1.1.0"
+ENGINE_VERSION = "1.2.0"
 
 MODULE_WEIGHTS: dict[str, float] = {
     "title": 0.05,
@@ -42,7 +54,11 @@ ANALYZERS: dict[str, Callable[[_Context], ModuleResult]] = {
     "title": lambda c: title.analyze(c.text, c.language, c.field),
     "abstract": lambda c: abstract.analyze(c.text, c.language, c.field),
     "structure": lambda c: structure.analyze(c.text, c.language, c.field),
+    "literature": lambda c: literature.analyze(c.text, c.language, c.field),
+    "originality": lambda c: originality.analyze(c.text, c.language, c.field),
     "methodology": lambda c: methodology.analyze(c.text, c.language, c.field),
+    "findings": lambda c: findings.analyze(c.text, c.language, c.field),
+    "conclusions": lambda c: conclusions.analyze(c.text, c.language, c.field),
     "references": lambda c: references.analyze(c.text, c.language, c.field),
     "lexical": lambda c: lexical.analyze(c.tokens, c.language),
     "delivery": lambda c: delivery.analyze(c.sentences, c.tokens, c.language),

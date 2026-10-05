@@ -24,7 +24,19 @@ from app.services.analysis.engine import (
     analyze_text,
     effective_weights,
 )
-from app.services.analysis.modules import abstract, delivery, lexical, methodology, references, structure, title
+from app.services.analysis.modules import (
+    abstract,
+    conclusions,
+    delivery,
+    findings,
+    lexical,
+    literature,
+    methodology,
+    originality,
+    references,
+    structure,
+    title,
+)
 from app.services.analysis.text_extractor import TextExtractionError, extract_text
 from app.services.analysis.text_utils import (
     band_score,
@@ -278,7 +290,8 @@ def test_module_weights_cover_all_11_modules_and_sum_to_one():
     assert len(MODULE_WEIGHTS) == 11
     assert sum(MODULE_WEIGHTS.values()) == pytest.approx(1.0)
     assert set(EVALUATED_MODULES) | set(NOT_YET_EVALUATED) == set(MODULE_WEIGHTS)
-    assert set(NOT_YET_EVALUATED) == {"literature", "originality", "findings", "conclusions"}
+    assert NOT_YET_EVALUATED == ()
+    assert len(EVALUATED_MODULES) == 11
     assert sum(effective_weights().values()) == pytest.approx(1.0)
 
 
@@ -423,6 +436,147 @@ def test_references_law_ignores_recency_and_doi():
     assert not any("DOI" in f for f in law.feedback)
 
 
+# --- modules: literature / originality / findings / conclusions -------------
+
+LIT_REVIEW_EN = (
+    "Literature Review\n"
+    + " ".join(
+        f"Previous studies reported mixed effects of feedback (Author{chr(65 + i)}, {2015 + i}; Writer{chr(65 + i)}, {2018 + i}). "
+        "In contrast, recent research suggests that timing matters more than volume. "
+        for i in range(8)
+    )
+)
+GAP_INTRO_EN = (
+    "Introduction\n"
+    "Feedback has been widely studied in schools, yet little is known about structured feedback in large lectures. "
+    "To our knowledge, no study has examined weekly feedback cycles across two universities. "
+    "This study contributes to the literature by testing a scalable feedback design with a new cohort.\n"
+)
+RICH_RESULTS_EN = (
+    "Results\n"
+    "Table 1 reports descriptive statistics: mean score was 72.4 (SD = 8.1) in the treatment group and 65.2 (SD = 9.3) "
+    "in the control group. The difference was significant, t(212) = 4.31, p < .001, with a medium effect size "
+    "(Cohen's d = 0.59, 95% CI [0.31, 0.86]). Regression results in Figure 2 show β = 0.32 for feedback frequency, "
+    "explaining 18% of variance in final grades across 214 students.\n"
+)
+GOOD_CONCLUSION_EN = (
+    "Conclusion\n"
+    "Structured feedback improved final grades and the effect was significant across both universities. "
+    "These results have practical implications: instructors should schedule weekly feedback cycles. "
+    "A limitation of this study is the short observation period. "
+    "Future research should examine long-term retention and other disciplines.\n"
+)
+
+
+def test_literature_rewards_cited_synthesised_review():
+    text = GAP_INTRO_EN + LIT_REVIEW_EN + "\n" + METHOD_EN * 4 + "\n" + RICH_RESULTS_EN
+    result = literature.analyze(text, "en", field="education")
+    assert result.metrics["scope"] == "literature"
+    assert result.metrics["multi_source_citations"] == 8
+    assert result.metrics["synthesis_phrase_groups"] >= 2
+    assert result.score > literature.analyze(IMRAD_EN, "en", field="education").score
+
+
+def test_literature_falls_back_to_introduction_and_flags_missing_citations():
+    result = literature.analyze(IMRAD_EN, "en", field="education")
+    assert result.metrics["scope"] == "introduction"
+    assert result.metrics["in_text_citations"] == 0
+    assert any("atif yok" in f for f in result.feedback)
+    assert literature.analyze(UNSTRUCTURED_EN, "en").score == 0
+
+
+def test_literature_law_scans_body_without_ratio():
+    result = literature.analyze(LIT_REVIEW_EN + "\nConclusion\n" + CONCLUSION_EN, "en", field="law")
+    assert result.metrics["scope"] == "body"
+    assert result.metrics["section_ratio"] is None
+
+
+def test_originality_repetition_ratio():
+    assert originality.repetition_ratio(tokenize("a b c d e f g h i j k l")) == 0
+    assert originality.repetition_ratio(tokenize("a b c d e f " * 10)) == pytest.approx(1.0)
+
+
+def test_originality_rewards_gap_contribution_and_low_repetition():
+    text = "Abstract\n" + RICH_ABSTRACT + GAP_INTRO_EN + LIT_REVIEW_EN + "\n" + RICH_RESULTS_EN
+    strong = originality.analyze(text, "en")
+    weak = originality.analyze(IMRAD_EN, "en")
+    assert strong.metrics["gap_indicator_groups"] >= 2
+    assert strong.metrics["has_contribution_statement"]
+    assert weak.metrics["repetition_ratio"] > 0.5  # fixture tekrarli bloklardan olusuyor
+    assert strong.score > weak.score
+    assert strong.confidence == 0.5
+
+
+def test_originality_law_accepts_unsettled_case_law_as_gap():
+    text = "Introduction\nThe question remains controversial and the case law is unsettled in Turkish doctrine.\n"
+    assert originality.analyze(text, "en", field="law").metrics["gap_indicator_groups"] == 1
+    assert originality.analyze(text, "en", field="education").metrics["gap_indicator_groups"] == 0
+
+
+def test_findings_quantitative_profile_rewards_statistics():
+    text = "Introduction\n" + BODY_EN * 2 + "\nMethodology\n" + METHOD_EN * 2 + "\n" + RICH_RESULTS_EN
+    rich = findings.analyze(text, "en", field="health")
+    assert rich.metrics["profile"] == "quantitative"
+    assert rich.metrics["stat_marker_groups"] >= 4
+    assert rich.metrics["table_figure_refs"]
+    assert rich.score > findings.analyze(IMRAD_EN, "en", field="health").score
+
+
+def test_findings_qualitative_profile_uses_quotes_and_themes():
+    quote = '"I finally understood what the instructor expected from my weekly assignments"'
+    results = "Results\n" + " ".join(
+        f"Theme {i}: participants valued timely comments. P{i} said {quote}." for i in range(1, 6)
+    )
+    text = "Methodology\nWe conducted semi-structured interviews and a thematic analysis.\n" + results
+    result = findings.analyze(text, "en", field="education")
+    assert result.metrics["profile"] == "qualitative"
+    assert result.metrics["quotes"] == 5 and result.metrics["participant_codes"] == 5
+    assert result.score >= 70
+
+
+def test_findings_law_profile_counts_legal_references():
+    text = "Introduction\n" + " ".join(
+        f"Under Article {i} of the Code, Yargıtay held in E. 2019/{i} that the clause is void." for i in range(1, 7)
+    )
+    result = findings.analyze(text, "en", field="law")
+    assert result.metrics["profile"] == "law"
+    assert result.metrics["legal_references"] >= 6
+    assert "section_ratio" not in result.metrics
+
+
+def test_findings_missing_section_is_halved():
+    result = findings.analyze(UNSTRUCTURED_EN, "en")
+    assert result.metrics["scope"] is None
+    assert result.confidence == 0.4
+
+
+def test_conclusions_rewards_limitations_future_work_and_no_new_citations():
+    base = "Introduction\n" + BODY_EN * 3 + "\n" + RICH_RESULTS_EN
+    good = conclusions.analyze(base + GOOD_CONCLUSION_EN, "en")
+    assert good.metrics["has_limitations"] and good.metrics["has_future_research"] and good.metrics["has_implications"]
+    assert good.metrics["new_citations"] == 0
+
+    cited = conclusions.analyze(
+        base + GOOD_CONCLUSION_EN.replace("disciplines.", "disciplines (Smith, 2021; Lee, 2022)."), "en"
+    )
+    assert cited.metrics["new_citations"] == 1
+    assert cited.score < good.score
+    assert "yeni kaynak" in cited.feedback[0]
+
+
+def test_conclusions_detects_turkish_obligation_mood_as_implication():
+    result = conclusions.analyze(IMRAD_TR, "tr")
+    assert result.metrics["has_implications"]  # "dahil edilmelidir"
+
+
+def test_conclusions_law_profile_and_missing_section():
+    text = "Introduction\n" + BODY_EN + "\nConclusion\nThe legislature should amend the statute.\n"
+    law = conclusions.analyze(text, "en", field="law")
+    assert law.metrics["profile"] == "law"
+    assert not any("sinirliliklari" in f for f in law.feedback)
+    assert conclusions.analyze(UNSTRUCTURED_EN, "en").score == 0
+
+
 # --- service (status transitions) -------------------------------------------
 
 @pytest.fixture
@@ -527,7 +681,8 @@ def test_report_endpoint_returns_completed_report(api, tmp_path):
     body = resp.json()
     assert set(body) == {
         "id", "status", "rejection_risk_score", "word_count", "language",
-        "score_title", "score_abstract", "score_structure", "score_methodology", "score_references",
+        "score_title", "score_abstract", "score_structure", "score_literature", "score_originality",
+        "score_methodology", "score_findings", "score_conclusions", "score_references",
         "score_lexical", "score_delivery", "full_report", "revision_suggestions",
     }
     assert body["id"] == str(analysis.id)

@@ -17,6 +17,10 @@ from app.services.analysis.text_utils import (
 SECTION_PATTERNS: dict[str, re.Pattern] = {
     "abstract": re.compile(r"^(abstract|özet|öz)\b"),
     "introduction": re.compile(r"^(introduction|giriş)\b"),
+    "literature": re.compile(
+        r"^(literature review|literature|related work|background|theoretical framework|conceptual framework|"
+        r"alanyazın|literatür|kuramsal çerçeve|kavramsal çerçeve|ilgili çalışmalar)"
+    ),
     "methodology": re.compile(
         r"(method|yöntem|metot|metod|materials and methods|gereç ve yöntem|research design|araştırma deseni)"
     ),
@@ -43,6 +47,7 @@ EXPECTED_ORDER = ("abstract", "introduction", "methodology", "results", "conclus
 SECTION_LABELS_TR = {
     "abstract": "Ozet/Abstract",
     "introduction": "Giris",
+    "literature": "Alanyazin",
     "methodology": "Yontem",
     "results": "Bulgular",
     "discussion": "Tartisma",
@@ -65,7 +70,6 @@ def detect_sections(text: str) -> dict[str, int]:
             if name not in found and pattern.search(line):
                 found[name] = idx
     return found
-
 
 
 def extract_sections(text: str) -> dict[str, str]:

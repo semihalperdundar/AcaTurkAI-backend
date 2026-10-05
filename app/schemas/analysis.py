@@ -36,7 +36,11 @@ class AnalysisReportResponse(BaseModel):
     score_title: float | None = None
     score_abstract: float | None = None
     score_structure: float | None = None
+    score_literature: float | None = None
+    score_originality: float | None = None
     score_methodology: float | None = None
+    score_findings: float | None = None
+    score_conclusions: float | None = None
     score_references: float | None = None
     score_lexical: float | None = None
     score_delivery: float | None = None

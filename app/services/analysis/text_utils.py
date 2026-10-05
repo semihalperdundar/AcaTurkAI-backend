@@ -69,6 +69,14 @@ def split_sentences(text: str) -> list[str]:
     return [s for s in sentences if count_words(s) >= 3]
 
 
+STEM_LEN = 5  # Turkce ekler icin kaba kok eslemesi (degerlendirme -> degerl)
+
+
+def content_stems(tokens: list[str], min_len: int = 4) -> set[str]:
+    """Icerik kelimelerinin (>=min_len harf, stopword degil) kaba kokleri."""
+    return {t[:STEM_LEN] for t in tokens if len(t) >= min_len and t not in STOPWORDS}
+
+
 def matches_stem(token: str, stems: tuple[str, ...]) -> bool:
     return token.startswith(stems)
 

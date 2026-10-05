@@ -48,16 +48,21 @@ def split_entries(block: str) -> list[str]:
     return entries
 
 
-def _in_text_citations(body: str) -> int:
+def count_in_text_citations(body: str) -> int:
     return sum(len(p.findall(body)) for p in IN_TEXT_PATTERNS)
+
+
+def body_before_references(text: str) -> str:
+    """Kaynakca basligindan onceki metin (baslik yoksa tum metin)."""
+    heading_idx = detect_sections(text).get("references")
+    return "\n".join(text.split("\n")[:heading_idx]) if heading_idx is not None else text
 
 
 def analyze(text: str, language: str, field: str | None = None, today: date | None = None) -> ModuleResult:
     profile_name = field if field in COUNT_BANDS else "default"
     is_law = profile_name == "law"
     heading_idx = detect_sections(text).get("references")
-    body = "\n".join(text.split("\n")[:heading_idx]) if heading_idx is not None else text
-    citations = _in_text_citations(body)
+    citations = count_in_text_citations(body_before_references(text))
     entries = split_entries(extract_sections(text).get("references", ""))
 
     if not entries:

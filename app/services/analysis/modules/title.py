@@ -9,10 +9,10 @@ import re
 
 from app.services.analysis.modules.structure import detect_sections, extract_sections
 from app.services.analysis.text_utils import (
-    STOPWORDS,
     ModuleResult,
     band_score,
     clamp,
+    content_stems,
     count_words,
     normalize,
     tokenize,
@@ -24,7 +24,6 @@ LENGTH_BANDS = {
     "tr": {"ideal": (6, 14), "zero": (2, 28)},
 }
 TITLE_MAX_WORDS = 30
-STEM_LEN = 5  # Turkce ekler icin kaba kok eslemesi (degerlendirme -> degerl)
 
 VAGUE_RE = re.compile(
     r"\b(a study of|a study on|an investigation of|an investigation into|some aspects|various|"
@@ -41,10 +40,6 @@ def find_title(text: str) -> str | None:
         if 2 <= count_words(stripped) <= TITLE_MAX_WORDS:
             return stripped
     return None
-
-
-def _content_stems(tokens: list[str]) -> set[str]:
-    return {t[:STEM_LEN] for t in tokens if len(t) >= 4 and t not in STOPWORDS}
 
 
 def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
@@ -72,8 +67,8 @@ def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
 
     sections = extract_sections(text)
     reference = " ".join(sections.get(s, "") for s in ("abstract", "introduction")) or text[:5000]
-    title_stems = _content_stems(tokenize(title))
-    overlap = len(title_stems & _content_stems(tokenize(reference))) / len(title_stems) if title_stems else 0.0
+    title_stems = content_stems(tokenize(title))
+    overlap = len(title_stems & content_stems(tokenize(reference))) / len(title_stems) if title_stems else 0.0
     if overlap < 0.5:
         feedback.append(
             f"Baslik kavramlarinin yalnizca %{overlap * 100:.0f}'i ozet/giriste geciyor; baslik icerigi temsil etmiyor olabilir."
