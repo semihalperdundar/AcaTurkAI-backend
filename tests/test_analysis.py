@@ -400,3 +400,76 @@ def test_report_endpoint_404_for_missing_or_foreign_analysis(api, tmp_path):
 
     assert client.get(f"/api/analyses/{uuid.uuid4()}/report").status_code == 404
     assert client.get(f"/api/analyses/{foreign.id}/report").status_code == 404
+
+
+# --- API: GET /api/analyses/{id}/pdf -----------------------------------------
+
+def _owned_analysis(session, tmp_path, user, status_: str | None = None) -> Analysis:
+    analysis = _make_analysis(session, tmp_path, "paper.txt", IMRAD_EN.encode("utf-8"))
+    analysis.user_id = user.id
+    if status_:
+        analysis.status = status_
+    session.commit()
+    return analysis
+
+
+def test_pdf_endpoint_returns_pdf_for_completed_analysis(api, tmp_path):
+    import io
+
+    from pypdf import PdfReader
+
+    client, session, user = api
+    analysis = _owned_analysis(session, tmp_path, user)
+    analysis_service.process_analysis(session, analysis.id)
+    analysis.title = "Dijital Geri Bildirim ve Öğrenci Başarısı: Çığır Açan Şişli Örneği"
+    session.commit()
+
+    resp = client.get(f"/api/analyses/{analysis.id}/pdf")
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/pdf"
+    assert resp.headers["content-disposition"] == f'attachment; filename="acaturk_analysis_{analysis.id}.pdf"'
+    assert resp.content.startswith(b"%PDF-")
+    text = "".join(page.extract_text() for page in PdfReader(io.BytesIO(resp.content)).pages)
+    assert "Öğrenci Başarısı: Çığır Açan Şişli" in text
+    assert "Yönetici Özeti" in text and "Revizyon Önerileri" in text
+
+
+@pytest.mark.parametrize("state", ["pending", "processing"])
+def test_pdf_endpoint_409_when_not_ready(api, tmp_path, state):
+    client, session, user = api
+    analysis = _owned_analysis(session, tmp_path, user, state)
+
+    assert client.get(f"/api/analyses/{analysis.id}/pdf").status_code == 409
+
+
+def test_pdf_endpoint_422_when_failed(api, tmp_path):
+    client, session, user = api
+    analysis = _owned_analysis(session, tmp_path, user, "failed")
+
+    assert client.get(f"/api/analyses/{analysis.id}/pdf").status_code == 422
+
+
+def test_pdf_endpoint_404_for_missing_or_foreign_analysis(api, tmp_path):
+    client, session, _user = api
+    foreign = _make_analysis(session, tmp_path, "paper.txt", IMRAD_EN.encode("utf-8"))
+    foreign.status = "completed"  # tamamlanmis olsa bile sahibi degilse 404 (403 degil)
+    session.commit()
+
+    assert client.get(f"/api/analyses/{uuid.uuid4()}/pdf").status_code == 404
+    assert client.get(f"/api/analyses/{foreign.id}/pdf").status_code == 404
+
+
+def test_pdf_html_escapes_user_content_and_blocks_external_fetch():
+    from app.services import pdf_service
+
+    analysis = Analysis(
+        id=uuid.uuid4(), status="completed", language="en", word_count=1,
+        title='<img src="file:///etc/passwd">', full_report={}, revision_suggestions={},
+    )
+    html = pdf_service.render_html(analysis)
+
+    assert '<img src="file:///etc/passwd">' not in html
+    assert "&lt;img" in html
+    with pytest.raises(ValueError):
+        pdf_service._deny_url_fetcher("file:///etc/passwd")
