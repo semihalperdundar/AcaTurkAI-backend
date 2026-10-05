@@ -7,10 +7,14 @@ import uuid
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+from fastapi.testclient import TestClient
 
 from app import models  # noqa: F401  (iliskileri Base.metadata'ya kaydeder)
-from app.database import Base
+from app.database import Base, get_db
+from app.main import app
 from app.models.analysis import Analysis
+from app.routers.deps import get_current_user
 from app.services import analysis_service
 from app.services.analysis.engine import MODULE_WEIGHTS, analyze_text
 from app.services.analysis.modules import delivery, lexical, structure
@@ -334,3 +338,65 @@ def test_process_analysis_marks_failed_on_unexpected_error(db, tmp_path, monkeyp
 
 def test_process_analysis_not_found(db):
     assert analysis_service.process_analysis(db, uuid.uuid4())["status"] == "not_found"
+
+
+# --- API: GET /api/analyses/{id}/report --------------------------------------
+
+@pytest.fixture
+def api(tmp_path, monkeypatch):
+    """Tek baglantili SQLite (StaticPool) + auth override; TestClient thread'i ayni DB'yi gorur."""
+    monkeypatch.setattr(analysis_service, "UPLOAD_DIR", tmp_path)
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    user = type("FakeUser", (), {"id": uuid.uuid4()})()
+
+    app.dependency_overrides[get_db] = lambda: session
+    app.dependency_overrides[get_current_user] = lambda: user
+    yield TestClient(app), session, user
+    app.dependency_overrides.clear()
+    session.close()
+
+
+def test_report_endpoint_returns_completed_report(api, tmp_path):
+    client, session, user = api
+    analysis = _make_analysis(session, tmp_path, "paper.txt", IMRAD_EN.encode("utf-8"))
+    analysis.user_id = user.id
+    session.commit()
+    analysis_service.process_analysis(session, analysis.id)
+
+    resp = client.get(f"/api/analyses/{analysis.id}/report")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body) == {
+        "id", "status", "rejection_risk_score", "word_count", "language",
+        "score_structure", "score_lexical", "score_delivery", "full_report", "revision_suggestions",
+    }
+    assert body["id"] == str(analysis.id)
+    assert body["status"] == "completed"
+    assert body["language"] == "en"
+    assert body["word_count"] > 300
+    assert body["score_structure"] == body["full_report"]["modules"]["structure"]["score"]
+    assert set(body["revision_suggestions"]) == set(MODULE_WEIGHTS)
+
+
+def test_report_endpoint_pending_returns_null_scores(api, tmp_path):
+    client, session, user = api
+    analysis = _make_analysis(session, tmp_path, "paper.txt", IMRAD_EN.encode("utf-8"))
+    analysis.user_id = user.id
+    session.commit()
+
+    body = client.get(f"/api/analyses/{analysis.id}/report").json()
+
+    assert body["status"] == "pending"
+    assert body["rejection_risk_score"] is None
+    assert body["full_report"] is None
+
+
+def test_report_endpoint_404_for_missing_or_foreign_analysis(api, tmp_path):
+    client, session, _user = api
+    foreign = _make_analysis(session, tmp_path, "paper.txt", IMRAD_EN.encode("utf-8"))  # baska user_id
+
+    assert client.get(f"/api/analyses/{uuid.uuid4()}/report").status_code == 404
+    assert client.get(f"/api/analyses/{foreign.id}/report").status_code == 404
