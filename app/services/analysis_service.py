@@ -111,9 +111,8 @@ def process_analysis(db: Session, analysis_id: uuid.UUID | str) -> dict:
         analysis.word_count = extracted.word_count
         analysis.language = report["language"]
         analysis.title = analysis.title or _guess_title(extracted.text)
-        analysis.score_structure = modules["structure"]["score"]
-        analysis.score_lexical = modules["lexical"]["score"]
-        analysis.score_delivery = modules["delivery"]["score"]
+        for name, module in modules.items():
+            setattr(analysis, f"score_{name}", module["score"])  # kolonlar: Analysis.score_<modul>
         analysis.rejection_risk_score = report["rejection_risk_score"]
         analysis.full_report = report
         analysis.revision_suggestions = {name: m["feedback"] for name, m in modules.items()}

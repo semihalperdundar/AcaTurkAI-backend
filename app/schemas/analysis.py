@@ -33,7 +33,11 @@ class AnalysisReportResponse(BaseModel):
     rejection_risk_score: float | None = None
     word_count: int | None = None
     language: str | None = None
+    score_title: float | None = None
+    score_abstract: float | None = None
     score_structure: float | None = None
+    score_methodology: float | None = None
+    score_references: float | None = None
     score_lexical: float | None = None
     score_delivery: float | None = None
     full_report: dict[str, Any] | None = None

@@ -3,6 +3,7 @@ Analiz motoru v1 testleri - ag/Postgres/Redis gerektirmez.
 Servis testi in-memory SQLite + tmp_path uzerinde calisir.
 """
 import uuid
+from datetime import date
 
 import pytest
 from sqlalchemy import create_engine
@@ -16,8 +17,14 @@ from app.main import app
 from app.models.analysis import Analysis
 from app.routers.deps import get_current_user
 from app.services import analysis_service
-from app.services.analysis.engine import MODULE_WEIGHTS, analyze_text
-from app.services.analysis.modules import delivery, lexical, structure
+from app.services.analysis.engine import (
+    EVALUATED_MODULES,
+    MODULE_WEIGHTS,
+    NOT_YET_EVALUATED,
+    analyze_text,
+    effective_weights,
+)
+from app.services.analysis.modules import abstract, delivery, lexical, methodology, references, structure, title
 from app.services.analysis.text_extractor import TextExtractionError, extract_text
 from app.services.analysis.text_utils import (
     band_score,
@@ -254,10 +261,10 @@ def test_delivery_penalizes_informal_long_sentences():
 
 def test_engine_report_contract():
     report = analyze_text(IMRAD_EN, field="education")
-    assert set(report["modules"]) == set(MODULE_WEIGHTS)
+    assert set(report["modules"]) == set(EVALUATED_MODULES)
     assert report["rejection_risk_score"] == pytest.approx(100 - report["overall_score"])
     assert report["language"] == "en"
-    assert len(report["editorial_board"]["reviews"]) == 3
+    assert len(report["editorial_board"]["reviews"]) == len(EVALUATED_MODULES)
     for module in report["modules"].values():
         assert 0 <= module["score"] <= 100
         assert {"agent", "verdict", "summary", "key_issues", "confidence"} <= set(module["agent_review"])
@@ -265,6 +272,155 @@ def test_engine_report_contract():
 
 def test_engine_structured_paper_beats_unstructured():
     assert analyze_text(IMRAD_EN)["overall_score"] > analyze_text(UNSTRUCTURED_EN)["overall_score"]
+
+
+def test_module_weights_cover_all_11_modules_and_sum_to_one():
+    assert len(MODULE_WEIGHTS) == 11
+    assert sum(MODULE_WEIGHTS.values()) == pytest.approx(1.0)
+    assert set(EVALUATED_MODULES) | set(NOT_YET_EVALUATED) == set(MODULE_WEIGHTS)
+    assert set(NOT_YET_EVALUATED) == {"literature", "originality", "findings", "conclusions"}
+    assert sum(effective_weights().values()) == pytest.approx(1.0)
+
+
+def test_engine_overall_is_weighted_mean_of_module_scores():
+    report = analyze_text(IMRAD_EN, field="education")
+    weights = effective_weights()
+    expected = sum(report["modules"][n]["score"] * weights[n] for n in EVALUATED_MODULES)
+    assert report["overall_score"] == pytest.approx(expected, abs=0.05)
+
+
+# --- modules: title / abstract / methodology / references -------------------
+
+RICH_ABSTRACT = (
+    "Abstract\n"
+    "The aim of this study is to evaluate the effect of structured feedback on student achievement. "
+    "Data were collected from 214 participants through a validated survey and analysed with regression. "
+    "Results show a significant positive effect of feedback on final grades (β = 0.32, p < .01). "
+    "We conclude that instructors should integrate feedback cycles, which has clear implications for course design. "
+    * 4
+    + "\nKeywords: feedback, achievement, higher education\n"
+)
+GOOD_REFERENCES = "\n".join(
+    f"Author{chr(65 + i % 26)}, B. ({2016 + i % 8}). Feedback study {i}. Journal of Learning, 4(2), 1-20. "
+    f"https://doi.org/10.1000/jl.{i}"
+    for i in range(30)
+)
+CITED_BODY = " ".join(f"Prior work supports this (Author{chr(65 + i % 26)}, {2016 + i % 8})." for i in range(30))
+
+
+def test_title_scores_and_flags_form_issues():
+    good = title.analyze(IMRAD_EN, "en")
+    assert good.metrics["title"] == "Structured Feedback and Student Achievement"
+    assert good.metrics["concept_overlap"] == 1.0
+
+    bad_text = IMRAD_EN.replace(
+        "Structured Feedback and Student Achievement", "A NOVEL STUDY OF SOME ASPECTS OF LEARNING."
+    )
+    bad = title.analyze(bad_text, "en")
+    assert bad.score < good.score
+    assert bad.metrics["ends_with_period"] and bad.metrics["all_caps"]
+    assert bad.metrics["vague_phrase"] and bad.metrics["hype_phrase"]
+
+
+def test_title_missing_returns_zero_with_low_confidence():
+    result = title.analyze(IMRAD_TR, "tr")
+    assert result.score == 0 and result.confidence <= 0.3
+
+
+def test_abstract_detects_moves_keywords_and_numbers():
+    result = abstract.analyze(RICH_ABSTRACT + "Introduction\n" + BODY_EN, "en")
+    assert all(result.metrics["moves"].values())
+    assert result.metrics["has_keywords"] and result.metrics["has_quantitative_result"]
+    assert 150 <= result.metrics["word_count"] <= 300
+    assert result.score >= 90
+
+    thin = abstract.analyze(IMRAD_EN, "en")
+    assert thin.score < result.score
+    assert any("eksik hamle" in f for f in thin.feedback)
+
+
+def test_abstract_law_profile_does_not_require_method_or_numbers():
+    law_abstract = (
+        "Abstract\nThis article examines the constitutional limits of emergency decrees. "
+        "It argues that judicial review must remain available, and therefore proposes a narrower reading. " * 8
+    )
+    result = abstract.analyze(law_abstract, "en", field="law")
+    assert set(result.metrics["moves"]) == {"purpose", "argument", "conclusion"}
+    assert not any("nicel" in f for f in result.feedback)
+
+
+def test_abstract_missing():
+    assert abstract.analyze(UNSTRUCTURED_EN, "en").score == 0
+
+
+def test_methodology_detects_sample_size_and_penalizes_missing_section():
+    structured = methodology.analyze(IMRAD_EN, "en", field="education")
+    unstructured = methodology.analyze(UNSTRUCTURED_EN, "en", field="education")
+    assert structured.metrics["sample_size"] == 214
+    assert structured.metrics["has_section"] and not unstructured.metrics["has_section"]
+    assert structured.score > unstructured.score
+    assert unstructured.confidence < structured.confidence
+
+
+def test_methodology_health_profile_requires_ethics():
+    default = methodology.analyze(IMRAD_EN, "en", field="education")
+    health = methodology.analyze(IMRAD_EN, "en", field="health")
+    assert health.score < default.score
+    assert any("etik kurul" in f.lower() for f in health.feedback)
+
+    with_ethics = IMRAD_EN.replace(
+        "Participants were 214", "The study was approved by the ethics committee and informed consent was obtained. Participants were 214"
+    )
+    assert methodology.analyze(with_ethics, "en", field="health").score > health.score
+
+
+def test_methodology_law_profile_searches_whole_text_for_legal_method():
+    law_text = "Introduction\n" + (
+        "This article adopts a doctrinal and comparative approach, analysing statute law and court decisions. " * 5
+    )
+    result = methodology.analyze(law_text, "en", field="law")
+    assert result.metrics["field_profile"] == "law"
+    assert result.metrics["elements_found"] == {"approach": True, "sources": True}
+    assert result.score == 100
+
+
+def test_references_scores_well_formed_cited_bibliography():
+    text = "Introduction\n" + CITED_BODY + "\nReferences\n" + GOOD_REFERENCES
+    result = references.analyze(text, "en", today=date(2026, 10, 5))
+    assert result.metrics["entry_count"] == 30
+    assert result.metrics["in_text_citations"] == 30
+    assert result.metrics["style"] == "author_year" and result.metrics["style_consistency"] == 1.0
+    assert result.metrics["doi_share"] == 1.0
+    assert result.score >= 90
+
+
+def test_references_flags_old_uncited_mixed_style_entries():
+    entries = "\n".join(
+        [f"[{i}] Author{i}, B. Old study. Journal, 1(1), 1-9, {1990 + i}." for i in range(1, 6)]
+        + [f"Writer{i}, C. ({1995 + i}). Another study. Journal, 2(1), 1-9." for i in range(5)]
+    )
+    result = references.analyze("Introduction\nNo citations here.\nReferences\n" + entries, "en", today=date(2026, 10, 5))
+    assert result.metrics["entry_count"] == 10
+    assert result.metrics["recent_share"] == 0
+    assert result.metrics["style_consistency"] == 0.5
+    assert result.score < 40
+    assert any("Metin ici atif" in f for f in result.feedback)
+
+
+def test_references_heading_without_entries():
+    result = references.analyze(IMRAD_TR, "tr")
+    assert result.score == 0
+    assert result.feedback[0] == "Kaynakca basligi var ama girdi bulunamadi."
+
+
+def test_references_law_ignores_recency_and_doi():
+    old_refs = "\n".join(f"Jurist{chr(65 + i % 26)}, A. ({1960 + i}). Treatise on law {i}. Ankara." for i in range(40))
+    body = " ".join(f"(Jurist{chr(65 + i % 26)}, {1960 + i})" for i in range(40))
+    text = "Introduction\n" + body + "\nReferences\n" + old_refs
+    law = references.analyze(text, "tr", field="law", today=date(2026, 10, 5))
+    default = references.analyze(text, "tr", field="education", today=date(2026, 10, 5))
+    assert law.score > default.score
+    assert not any("DOI" in f for f in law.feedback)
 
 
 # --- service (status transitions) -------------------------------------------
@@ -300,7 +456,7 @@ def test_process_analysis_completes_and_populates_fields(db, tmp_path):
     assert analysis.score_structure == analysis.full_report["modules"]["structure"]["score"]
     assert analysis.score_lexical is not None and analysis.score_delivery is not None
     assert analysis.rejection_risk_score == pytest.approx(100 - analysis.full_report["overall_score"])
-    assert set(analysis.revision_suggestions) == set(MODULE_WEIGHTS)
+    assert set(analysis.revision_suggestions) == set(EVALUATED_MODULES)
     assert analysis.processing_time_ms >= 0
 
 
@@ -371,14 +527,15 @@ def test_report_endpoint_returns_completed_report(api, tmp_path):
     body = resp.json()
     assert set(body) == {
         "id", "status", "rejection_risk_score", "word_count", "language",
-        "score_structure", "score_lexical", "score_delivery", "full_report", "revision_suggestions",
+        "score_title", "score_abstract", "score_structure", "score_methodology", "score_references",
+        "score_lexical", "score_delivery", "full_report", "revision_suggestions",
     }
     assert body["id"] == str(analysis.id)
     assert body["status"] == "completed"
     assert body["language"] == "en"
     assert body["word_count"] > 300
     assert body["score_structure"] == body["full_report"]["modules"]["structure"]["score"]
-    assert set(body["revision_suggestions"]) == set(MODULE_WEIGHTS)
+    assert set(body["revision_suggestions"]) == set(EVALUATED_MODULES)
 
 
 def test_report_endpoint_pending_returns_null_scores(api, tmp_path):

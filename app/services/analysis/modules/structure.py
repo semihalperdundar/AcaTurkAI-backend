@@ -67,6 +67,23 @@ def detect_sections(text: str) -> dict[str, int]:
     return found
 
 
+
+def extract_sections(text: str) -> dict[str, str]:
+    """bolum -> govde metni (basliktan bir sonraki tespit edilen basliga kadar).
+
+    Inline etiketli ozetlerde ("Abstract: ...") etiket sonrasi metin de govdeye dahildir.
+    """
+    lines = text.split("\n")
+    starts = sorted(detect_sections(text).items(), key=lambda kv: kv[1])
+    sections: dict[str, str] = {}
+    for i, (name, idx) in enumerate(starts):
+        end = starts[i + 1][1] if i + 1 < len(starts) else len(lines)
+        head = strip_heading_number(lines[idx])
+        inline = re.split(r"[:—–-]", head, maxsplit=1)[1] if _INLINE_LABEL_RE.match(normalize(head)) else ""
+        sections[name] = "\n".join([inline, *lines[idx + 1 : end]]).strip()
+    return sections
+
+
 def _order_ratio(found: dict[str, int], expected: tuple[str, ...]) -> float:
     present = [s for s in expected if s in found]
     if len(present) < 2:

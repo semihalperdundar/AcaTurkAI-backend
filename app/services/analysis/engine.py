@@ -1,39 +1,71 @@
 """
-Analiz motoru v1: metin -> 3 modul -> agirlikli genel skor -> full_report.
+Analiz motoru: metin -> kural tabanli moduller -> agirlikli genel skor -> full_report.
 
 Saf fonksiyon (DB/dosya/ag yok) -> dogrudan birim test edilebilir.
-Kalan 8 modul (spec Bolum 5) eklendikce MODULE_WEIGHTS genisler; agirliklar
-hesaplamada yeniden normalize edildigi icin mevcut skorlar kirilmaz.
+MODULE_WEIGHTS spec Bolum 5'teki 11 modulun TAMAMINI kapsar ve toplami 1.0'dir.
+Genel skor yalnizca uygulanmis modullerin (ANALYZERS) agirliklari uzerinden yeniden
+normalize edilir -> yeni modul eklendikce mevcut skorlar kirilmaz.
 """
-from app.services.analysis.modules import delivery, lexical, structure
-from app.services.analysis.text_utils import detect_language, split_sentences, tokenize, verdict_for
+from collections.abc import Callable
+from dataclasses import dataclass
 
-ENGINE_VERSION = "1.0.0"
+from app.services.analysis.modules import abstract, delivery, lexical, methodology, references, structure, title
+from app.services.analysis.text_utils import ModuleResult, detect_language, split_sentences, tokenize, verdict_for
+
+ENGINE_VERSION = "1.1.0"
 
 MODULE_WEIGHTS: dict[str, float] = {
-    "structure": 0.40,
-    "lexical": 0.30,
-    "delivery": 0.30,
+    "title": 0.05,
+    "abstract": 0.10,
+    "structure": 0.10,
+    "literature": 0.10,
+    "originality": 0.10,
+    "methodology": 0.15,
+    "findings": 0.12,
+    "conclusions": 0.08,
+    "references": 0.07,
+    "lexical": 0.06,
+    "delivery": 0.07,
 }
-NOT_YET_EVALUATED = (
-    "title", "abstract", "literature", "originality", "methodology",
-    "findings", "conclusions", "references",
-)
+
+
+@dataclass(frozen=True)
+class _Context:
+    text: str
+    tokens: list[str]
+    sentences: list[str]
+    language: str
+    field: str | None
+
+
+ANALYZERS: dict[str, Callable[[_Context], ModuleResult]] = {
+    "title": lambda c: title.analyze(c.text, c.language, c.field),
+    "abstract": lambda c: abstract.analyze(c.text, c.language, c.field),
+    "structure": lambda c: structure.analyze(c.text, c.language, c.field),
+    "methodology": lambda c: methodology.analyze(c.text, c.language, c.field),
+    "references": lambda c: references.analyze(c.text, c.language, c.field),
+    "lexical": lambda c: lexical.analyze(c.tokens, c.language),
+    "delivery": lambda c: delivery.analyze(c.sentences, c.tokens, c.language),
+}
+EVALUATED_MODULES = tuple(ANALYZERS)
+NOT_YET_EVALUATED = tuple(name for name in MODULE_WEIGHTS if name not in ANALYZERS)
+
+
+def effective_weights() -> dict[str, float]:
+    """Uygulanmis modullerin agirliklari, toplami 1.0 olacak sekilde normalize."""
+    total = sum(MODULE_WEIGHTS[name] for name in EVALUATED_MODULES)
+    return {name: MODULE_WEIGHTS[name] / total for name in EVALUATED_MODULES}
 
 
 def analyze_text(text: str, field: str | None = None) -> dict:
     tokens = tokenize(text)
     language = detect_language(tokens)
-    sentences = split_sentences(text)
 
-    results = {
-        "structure": structure.analyze(text, language, field),
-        "lexical": lexical.analyze(tokens, language),
-        "delivery": delivery.analyze(sentences, tokens, language),
-    }
+    context = _Context(text, tokens, split_sentences(text), language, field)
+    results = {name: run(context) for name, run in ANALYZERS.items()}
 
-    total_weight = sum(MODULE_WEIGHTS[name] for name in results)
-    overall = round(sum(r.score * MODULE_WEIGHTS[name] for name, r in results.items()) / total_weight, 1)
+    weights = effective_weights()
+    overall = round(sum(r.score * weights[name] for name, r in results.items()), 1)
     reviews = [r.agent_review for r in results.values()]
 
     return {
@@ -43,7 +75,8 @@ def analyze_text(text: str, field: str | None = None) -> dict:
         "word_count": len(tokens),
         "overall_score": overall,
         "rejection_risk_score": round(100 - overall, 1),
-        "weights": MODULE_WEIGHTS,
+        "weights": {name: round(w, 4) for name, w in weights.items()},
+        "configured_weights": MODULE_WEIGHTS,
         "modules": {name: r.to_dict() for name, r in results.items()},
         "editorial_board": {
             "decision": verdict_for(overall),

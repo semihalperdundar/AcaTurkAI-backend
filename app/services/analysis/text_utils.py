@@ -24,6 +24,7 @@ _EN_STOPWORDS = frozenset(
     "the of and to in a is that for on with as are by this be from an was "
     "were which or it at not have has".split()
 )
+STOPWORDS = _TR_STOPWORDS | _EN_STOPWORDS
 
 
 def normalize(word: str) -> str:
