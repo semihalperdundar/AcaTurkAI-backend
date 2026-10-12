@@ -3,7 +3,10 @@ Zengin yol (LLM icgoru) altyapisi: sozlesme, grounding, onbellek, mock pipeline.
 Dis API cagrisi yok; MockInsightClient ve sahte istemcilerle calisir.
 """
 import dataclasses
+import io
+import json
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -22,9 +25,13 @@ from app.services.analysis.modules.structure import SECTION_PATTERNS
 from app.services.analysis.profiles import BASE, CLAIM_EVIDENCE, LAW, PROFILES
 from app.services.insights import cache as cache_module
 from app.services.insights.cache import insight_cache_key
-from app.services.insights.client import MockInsightClient
+from app.config import get_settings
+from app.core import celery_app as celery_module
+from app.services import pdf_service
+from app.services.insights.client import AnthropicInsightClient, MockInsightClient, get_insight_client
+from app.services.insights.prompts import PROMPTS, get_prompt
 from app.services.insights.grounding import validate_grounding
-from app.services.insights.schema import Insight
+from app.services.insights.schema import Insight, InsightBatch
 from app.services.insights.service import generate_insights
 from tests.test_analysis import IMRAD_EN, IMRAD_TR
 
@@ -240,3 +247,144 @@ def test_generate_insights_skips_unfinished_and_missing_analyses(db):
 
 def test_generate_insights_task_is_registered():
     assert "acaturkai.generate_insights" in celery_app.tasks
+
+
+# --- Anthropic client (API cagrisi yok: sahte SDK istemcisi) -------------------
+
+class FakeAnthropic:
+    """beta.messages.parse imzasini taklit eder; gelen istegi kaydeder."""
+
+    def __init__(self, response):
+        self.requests = []
+        self.response = response
+        self.beta = SimpleNamespace(messages=SimpleNamespace(parse=self._parse))
+
+    def _parse(self, **kwargs):
+        self.requests.append(kwargs)
+        return self.response
+
+
+def _response(stop_reason="end_turn", parsed=None, category=None):
+    stop_details = SimpleNamespace(category=category) if stop_reason == "refusal" else None
+    return SimpleNamespace(stop_reason=stop_reason, stop_details=stop_details, parsed_output=parsed)
+
+
+RULE_MODULES = {
+    "findings": {"score": 33.3, "metrics": {"stat_marker_groups": 1}, "feedback": ["az istatistik"]},
+    "conclusions": {"score": 53.3, "metrics": {"has_limitations": False}, "feedback": []},
+    "title": {"score": 73.0, "metrics": {}, "feedback": []},
+}
+
+
+def test_anthropic_client_request_enforces_schema_and_assembles_prompt():
+    fake = FakeAnthropic(_response(parsed=InsightBatch(insights=[make_insight(RESULTS_SENTENCE)])))
+    client = AnthropicInsightClient(client=fake)
+    ctx = build_context(IMRAD_EN)
+
+    insights = client.generate(CLAIM_EVIDENCE, ctx, RULE_MODULES)
+
+    assert [i.evidence_quote for i in insights] == [RESULTS_SENTENCE]
+    request = fake.requests[0]
+    assert request["model"] == "claude-opus-5-5"
+    assert request["output_format"] is InsightBatch
+    assert request["output_config"] == {"effort": "medium"}
+    assert request["betas"] == ["server-side-fallback-2026-07-01"] and request["fallbacks"] == "default"
+    assert "findings, conclusions" in request["system"]  # izinli moduller istemde
+    user = request["messages"][0]["content"]
+    assert RESULTS_SENTENCE in user  # paket kesiti
+    findings = json.loads(user.split("<kural_bulgulari>\n", 1)[1].split("\n</kural_bulgulari>", 1)[0])
+    assert set(findings) == {"findings", "conclusions"}  # paket disi modul (title) gonderilmez
+
+
+def test_anthropic_client_request_is_byte_stable_for_same_input():
+    ctx = build_context(IMRAD_EN)
+    client = AnthropicInsightClient(client=FakeAnthropic(_response()))
+    first = client.build_request(CLAIM_EVIDENCE, ctx, RULE_MODULES)
+    second = client.build_request(CLAIM_EVIDENCE, build_context(IMRAD_EN), dict(reversed(RULE_MODULES.items())))
+    assert first["system"] == second["system"]
+    assert first["messages"] == second["messages"]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [_response("refusal", category="cyber"), _response("max_tokens"), _response("end_turn", parsed=None)],
+    ids=["refusal", "max_tokens", "unparsed"],
+)
+def test_anthropic_client_returns_nothing_on_refusal_or_incomplete_output(response):
+    client = AnthropicInsightClient(client=FakeAnthropic(response))
+    assert client.generate(CLAIM_EVIDENCE, build_context(IMRAD_EN), RULE_MODULES) == []
+
+
+def test_prompt_registry_covers_every_pack_and_rejects_unknown_ids():
+    packs = {pack for profile in [BASE, *PROFILES.values()] for pack in profile.insight_packs}
+    assert {pack.prompt_id for pack in packs} <= set(PROMPTS)
+    with pytest.raises(KeyError):
+        get_prompt("claim_evidence@999")
+
+
+def test_insight_client_factory(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "INSIGHTS_PROVIDER", "mock")
+    assert isinstance(get_insight_client(), MockInsightClient)
+    monkeypatch.setattr(settings, "INSIGHTS_PROVIDER", "openai")
+    with pytest.raises(ValueError):
+        get_insight_client()
+
+
+# --- trigger: run_analysis -> generate_insights_task ----------------------------
+
+@pytest.mark.parametrize(
+    ("status", "enabled", "expected_calls"),
+    [("completed", True, 1), ("skipped_already_completed", True, 0), ("failed", True, 0), ("completed", False, 0)],
+)
+def test_run_analysis_enqueues_insights_only_after_fresh_completion(monkeypatch, status, enabled, expected_calls):
+    analysis_id = str(uuid.uuid4())
+    queued: list[str] = []
+    monkeypatch.setattr(analysis_service, "process_analysis", lambda db, aid: {"status": status, "analysis_id": aid})
+    monkeypatch.setattr(celery_module.generate_insights_task, "delay", queued.append)
+    monkeypatch.setattr(celery_module.settings, "INSIGHTS_ENABLED", enabled)
+
+    result = celery_module.run_analysis(analysis_id)
+
+    assert result["status"] == status
+    assert queued == [analysis_id] * expected_calls
+
+
+# --- PDF: "Editor Gorusu" --------------------------------------------------------
+
+def _analysis_with_insights(status: str, items: list[dict]) -> Analysis:
+    return Analysis(
+        id=uuid.uuid4(), status="completed", language="en", word_count=500, title="Başlık",
+        full_report={"modules": {}, "insights": {"status": status, "items": items}}, revision_suggestions={},
+    )
+
+
+def test_pdf_html_renders_ready_insights_sorted_by_severity_and_escaped():
+    minor = make_insight(RESULTS_SENTENCE, severity="minor", issue="Küçük sorun")
+    blocker = make_insight('<b>"Nedensel" iddia</b> ileri sürülüyor', severity="blocker", issue="Nedensellik hatası")
+    html = pdf_service.render_html(_analysis_with_insights("ready", [minor.model_dump(), blocker.model_dump()]))
+
+    assert "Editör Görüşü" in html
+    assert html.index("Engelleyici") < html.index("Küçük</span>")  # once en agir
+    assert "<blockquote>" in html and RESULTS_SENTENCE in html
+    assert "<b>" not in html and "&lt;b&gt;" in html  # alinti kullanici metni -> kacirilir
+    assert "Öneri:" in html
+
+
+@pytest.mark.parametrize("status", ["failed", "pending", None])
+def test_pdf_html_omits_editor_section_unless_ready(status):
+    analysis = _analysis_with_insights(status, [make_insight(RESULTS_SENTENCE).model_dump()])
+    if status is None:
+        analysis.full_report = {"modules": {}}
+    assert "Editör Görüşü" not in pdf_service.render_html(analysis)
+
+
+def test_pdf_contains_editor_view_with_turkish_text():
+    from pypdf import PdfReader
+
+    insight = make_insight(RESULTS_SENTENCE, issue="İddia kanıtın ötesine geçiyor: nedensellik çıkarımı yapılmış.")
+    pdf = pdf_service.render_pdf(_analysis_with_insights("ready", [insight.model_dump()]))
+
+    text = "".join(page.extract_text() for page in PdfReader(io.BytesIO(pdf)).pages)
+    assert "Editör Görüşü" in text
+    assert "İddia kanıtın ötesine geçiyor" in text

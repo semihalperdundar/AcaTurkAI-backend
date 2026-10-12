@@ -1,8 +1,9 @@
 """
 Celery uygulamasi. Spec Bolum 13.1: 'Task Queue: Celery + Redis (analiz isleri icin)'.
 
-Gercek 11-modul analiz motoru Ay 2 kapsaminda buraya eklenecek
-(spec Bolum 12.1 - Paralel Analiz Katmani). Su an yalnizca iskelet + saglik testi task'i var.
+Analiz akisi iki gorevdir:
+  run_analysis          -> hizli yol: 11 kural modulu, skorlar kaydedilir (deterministik)
+  generate_insights_task -> zengin yol: hedefli LLM icgorusu, run_analysis bitince kuyruga alinir
 """
 from celery import Celery
 
@@ -41,17 +42,24 @@ def run_analysis(analysis_id: str) -> dict:
 
     db = SessionLocal()
     try:
-        return process_analysis(db, analysis_id)
+        result = process_analysis(db, analysis_id)
     finally:
         db.close()
+
+    # Hizli yol bitti, skorlar kaydedildi -> zengin yolu ayri gorev olarak kuyruga al.
+    # Yalnizca bu calismada "completed" olduysa: tekrar teslimde ("skipped_already_completed")
+    # ve hata durumunda icgoru istenmez. Icgoru hatasi analizi etkilemez.
+    if result.get("status") == "completed" and settings.INSIGHTS_ENABLED:
+        generate_insights_task.delay(result["analysis_id"])
+    return result
 
 
 @celery_app.task(name="acaturkai.generate_insights")
 def generate_insights_task(analysis_id: str) -> dict:
     """
     Zengin yol (LLM icgorusu) - hizli yoldan (run_analysis) AYRI calisir; skoru degistirmez.
-    Henuz otomatik tetiklenmez: istemci su an MockInsightClient (INSIGHTS_PROVIDER=mock).
-    Gercek istemci eklenince run_analysis tamamlandiginda kuyruga alinacak.
+    run_analysis bir analizi "completed" yaptiginda otomatik kuyruga alinir (INSIGHTS_ENABLED).
+    Istemci INSIGHTS_PROVIDER ile secilir ("anthropic" | "mock").
     """
     from app.database import SessionLocal
     from app.services.insights.service import generate_insights

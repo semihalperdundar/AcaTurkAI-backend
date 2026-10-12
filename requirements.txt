@@ -31,3 +31,6 @@ python-docx==1.1.2
 jinja2==3.1.4
 # 63.0 pydyf'i >=0.11,<0.12 araligina sabitler; 62.3 ust sinir koymadigi icin pydyf 0.12 ile kiriliyordu.
 weasyprint==63.0
+
+# Zengin yol (LLM icgorusu) - Claude API, yapilandirilmis cikti (beta.messages.parse)
+anthropic==1.13.0

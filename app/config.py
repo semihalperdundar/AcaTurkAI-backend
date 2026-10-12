@@ -30,7 +30,11 @@ class Settings(BaseSettings):
 
     # AI
     ANTHROPIC_API_KEY: str | None = None
-    INSIGHTS_PROVIDER: str = "mock"  # zengin yol icgoru istemcisi; simdilik yalnizca "mock"
+    # Zengin yol (LLM icgorusu). Kural skoru bunlardan bagimsizdir.
+    INSIGHTS_ENABLED: bool = True  # False -> analiz sonrasi icgoru gorevi kuyruga alinmaz
+    INSIGHTS_PROVIDER: str = "anthropic"  # "anthropic" | "mock" (mock: dis API yok, test/yerel)
+    INSIGHTS_MODEL: str = "claude-opus-5-5"
+    INSIGHTS_EFFORT: str = "medium"  # low | medium | high | xhigh | max
     OPENALEX_EMAIL: str | None = None
 
     # Storage

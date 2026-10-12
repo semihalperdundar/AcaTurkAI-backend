@@ -34,6 +34,8 @@ VERDICT_LABELS = {
     "major_revision": "Büyük revizyon",
     "reject": "Ret",
 }
+SEVERITY_LABELS = {"blocker": "Engelleyici", "major": "Önemli", "minor": "Küçük"}
+SEVERITY_ORDER = {"blocker": 0, "major": 1, "minor": 2}
 
 REPORT_TEMPLATE = """<!doctype html>
 <html lang="tr">
@@ -62,6 +64,17 @@ REPORT_TEMPLATE = """<!doctype html>
   .muted { color: #6b7280; }
   ul { margin: 1mm 0 0 5mm; padding: 0; }
   li { margin-bottom: 1mm; }
+  .insight { margin: 4mm 0; padding: 3mm 4mm; border: 1px solid #e5e7eb; border-radius: 2mm;
+             page-break-inside: avoid; }
+  .insight .head { font-weight: bold; margin-bottom: 2mm; }
+  .badge { display: inline-block; padding: 0.4mm 2mm; border-radius: 1mm; font-size: 8pt;
+           font-weight: bold; color: #ffffff; margin-right: 2mm; }
+  .badge.blocker { background: #b91c1c; }
+  .badge.major { background: #c2410c; }
+  .badge.minor { background: #4b5563; }
+  blockquote { margin: 2mm 0; padding: 2mm 3mm; border-left: 3px solid #9ca3af;
+               background: #f9fafb; font-style: italic; color: #374151; }
+  .fix-label { font-weight: bold; }
 </style>
 </head>
 <body>
@@ -78,6 +91,21 @@ REPORT_TEMPLATE = """<!doctype html>
     <div class="kpi"><div class="label">Ret Riski</div><div class="value">%{{ rejection_risk_score }}</div></div>
     <div class="kpi"><div class="label">Yayın Kurulu Kararı</div><div class="value">{{ decision }}</div></div>
   </div>
+
+  {% if insights %}
+  <h2>Editör Görüşü</h2>
+  <p class="muted">Yapay zekâ destekli editör yorumları. Skorları etkilemez; her yorum makaleden
+    birebir alıntıya dayanır.</p>
+  {% for i in insights %}
+  <div class="insight">
+    <div class="head"><span class="badge {{ i.severity }}">{{ i.severity_label }}</span>{{ i.module_label }}</div>
+    <p>{{ i.issue }}</p>
+    <blockquote>“{{ i.evidence_quote }}”</blockquote>
+    <p><span class="fix-label">Öneri:</span> {{ i.concrete_fix }}</p>
+    {% if i.example_rewrite %}<p><span class="fix-label">Örnek yazım:</span> {{ i.example_rewrite }}</p>{% endif %}
+  </div>
+  {% endfor %}
+  {% endif %}
 
   <h2>Modül Skorları</h2>
   <table>
@@ -120,6 +148,23 @@ def _verdict(value: str | None) -> str:
     return VERDICT_LABELS.get(value or "", value or "-")
 
 
+def _insights(report: dict) -> list[dict]:
+    """Yalnizca hazir (status=ready) icgoruler; once en agir olanlar. Hazir degilse bolum cikmaz."""
+    insights = report.get("insights") or {}
+    if insights.get("status") != "ready":
+        return []
+    rank = len(SEVERITY_ORDER)
+    items = sorted(insights.get("items", []), key=lambda i: SEVERITY_ORDER.get(i.get("severity"), rank))
+    return [
+        {
+            **item,
+            "severity_label": SEVERITY_LABELS.get(item.get("severity"), item.get("severity")),
+            "module_label": MODULE_LABELS.get(item.get("module"), item.get("module")),
+        }
+        for item in items
+    ]
+
+
 def build_context(analysis: Analysis) -> dict:
     report = analysis.full_report or {}
     modules = report.get("modules", {})
@@ -155,6 +200,7 @@ def build_context(analysis: Analysis) -> dict:
             for name, items in suggestions.items()
         ],
         "not_yet_evaluated": [MODULE_LABELS.get(n, n) for n in report.get("not_yet_evaluated", [])],
+        "insights": _insights(report),
     }
 
 
