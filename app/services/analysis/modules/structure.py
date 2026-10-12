@@ -2,9 +2,15 @@
 Modul: score_structure - akademik bolum yapisi (IMRAD) denetimi.
 
 Olculenler: zorunlu bolumlerin varligi, siralamasi, kaynakca varligi.
-Alan farki: hukuk (law) metinleri IMRAD izlemez -> yontem/bulgular beklenmez.
+params:
+  core_weights  : beklenen bolumler ve agirliklari (hangi bolumlerin zorunlu oldugu buradan gelir)
+  profile_label : metrics.field_profile etiketi
 """
+from __future__ import annotations
+
 import re
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
 from app.services.analysis.text_utils import (
     ModuleResult,
@@ -13,6 +19,9 @@ from app.services.analysis.text_utils import (
     normalize,
     strip_heading_number,
 )
+
+if TYPE_CHECKING:  # context.py bu modulu import eder -> dongusel import'u onle
+    from app.services.analysis.context import Context
 
 SECTION_PATTERNS: dict[str, re.Pattern] = {
     "abstract": re.compile(r"^(abstract|özet|öz)\b"),
@@ -32,16 +41,6 @@ SECTION_PATTERNS: dict[str, re.Pattern] = {
 # Inline etiket: "Abstract: ..." / "Özet — ..." (uzun satir olsa da bolum sayilir)
 _INLINE_LABEL_RE = re.compile(r"^(abstract|özet|öz)\s*[:—–-]")
 
-CORE_WEIGHTS: dict[str, float] = {
-    "abstract": 20,
-    "introduction": 20,
-    "methodology": 25,
-    "results": 20,
-    "conclusion": 15,
-}
-FIELD_CORE_OVERRIDES: dict[str, dict[str, float]] = {
-    "law": {"abstract": 30, "introduction": 35, "conclusion": 35},
-}
 EXPECTED_ORDER = ("abstract", "introduction", "methodology", "results", "conclusion")
 
 SECTION_LABELS_TR = {
@@ -72,13 +71,14 @@ def detect_sections(text: str) -> dict[str, int]:
     return found
 
 
-def extract_sections(text: str) -> dict[str, str]:
+def extract_sections(text: str, found: Mapping[str, int] | None = None) -> dict[str, str]:
     """bolum -> govde metni (basliktan bir sonraki tespit edilen basliga kadar).
 
     Inline etiketli ozetlerde ("Abstract: ...") etiket sonrasi metin de govdeye dahildir.
+    found verilirse (Context) basliklar yeniden taranmaz.
     """
     lines = text.split("\n")
-    starts = sorted(detect_sections(text).items(), key=lambda kv: kv[1])
+    starts = sorted((found if found is not None else detect_sections(text)).items(), key=lambda kv: kv[1])
     sections: dict[str, str] = {}
     for i, (name, idx) in enumerate(starts):
         end = starts[i + 1][1] if i + 1 < len(starts) else len(lines)
@@ -96,10 +96,10 @@ def _order_ratio(found: dict[str, int], expected: tuple[str, ...]) -> float:
     return sum(1 for a, b in pairs if found[a] < found[b]) / len(pairs)
 
 
-def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
-    weights = FIELD_CORE_OVERRIDES.get(field or "", CORE_WEIGHTS)
+def analyze(ctx: Context, params: Mapping[str, Any]) -> ModuleResult:
+    weights = params["core_weights"]
     expected = tuple(s for s in EXPECTED_ORDER if s in weights)
-    found = detect_sections(text)
+    found = ctx.section_index
     feedback: list[str] = []
 
     presence = 0.0
@@ -137,7 +137,7 @@ def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
             "sections_found": sorted(found, key=found.get),
             "expected_sections": list(weights),
             "order_ratio": round(order, 2),
-            "field_profile": field if field in FIELD_CORE_OVERRIDES else "imrad",
+            "field_profile": params["profile_label"],
         },
         confidence=confidence,
     )

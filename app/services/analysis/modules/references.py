@@ -3,20 +3,24 @@ Modul: score_references - kaynakca nicelik ve nitelik denetimi.
 
 Olculenler: kaynak sayisi (alana gore bant), guncellik (son 10 yil orani),
 metin ici atif yogunlugu, kaynak stili tutarliligi (APA/yazar-yil vs numarali), DOI orani.
-Alan farki: hukukta kaynak sayisi yuksek, guncellik ve DOI beklentisi dusuktur
-(mevzuat/ictihat ve eski temel eserler yaygin).
+params:
+  count_band     : beklenen kaynak sayisi bandi {"ideal": (lo, hi), "zero": (lo, hi)}
+  check_recency  : False -> guncellik puanlanmaz (tam puan) ve uyarilmaz
+  check_doi      : False -> DOI orani puanlanmaz (tam puan) ve uyarilmaz
+  profile_label  : metrics.field_profile etiketi
+Guncellik referans yili ctx.as_of'tan gelir (testte sabitlenir).
 """
-import re
-from datetime import date
+from __future__ import annotations
 
-from app.services.analysis.modules.structure import detect_sections, extract_sections
+import re
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
+
 from app.services.analysis.text_utils import ModuleResult, band_score, clamp
 
-COUNT_BANDS: dict[str, dict[str, tuple[float, float]]] = {
-    "default": {"ideal": (25, 70), "zero": (3, 200)},
-    "health": {"ideal": (20, 60), "zero": (3, 150)},
-    "law": {"ideal": (30, 150), "zero": (5, 300)},
-}
+if TYPE_CHECKING:
+    from app.services.analysis.context import Context
+
 RECENT_YEARS = 10
 RECENCY_BAND = {"ideal": (0.40, 1.0), "zero": (0.05, 1.01)}
 DOI_TARGET_SHARE = 0.5
@@ -52,18 +56,12 @@ def count_in_text_citations(body: str) -> int:
     return sum(len(p.findall(body)) for p in IN_TEXT_PATTERNS)
 
 
-def body_before_references(text: str) -> str:
-    """Kaynakca basligindan onceki metin (baslik yoksa tum metin)."""
-    heading_idx = detect_sections(text).get("references")
-    return "\n".join(text.split("\n")[:heading_idx]) if heading_idx is not None else text
-
-
-def analyze(text: str, language: str, field: str | None = None, today: date | None = None) -> ModuleResult:
-    profile_name = field if field in COUNT_BANDS else "default"
-    is_law = profile_name == "law"
-    heading_idx = detect_sections(text).get("references")
-    citations = count_in_text_citations(body_before_references(text))
-    entries = split_entries(extract_sections(text).get("references", ""))
+def analyze(ctx: Context, params: Mapping[str, Any]) -> ModuleResult:
+    check_recency = params["check_recency"]
+    check_doi = params["check_doi"]
+    heading_idx = ctx.section_index.get("references")
+    citations = count_in_text_citations(ctx.body)
+    entries = split_entries(ctx.sections.get("references", ""))
 
     if not entries:
         missing = "Kaynakca bolumu tespit edilemedi." if heading_idx is None else "Kaynakca basligi var ama girdi bulunamadi."
@@ -81,18 +79,18 @@ def analyze(text: str, language: str, field: str | None = None, today: date | No
     feedback: list[str] = []
     n = len(entries)
 
-    band = COUNT_BANDS[profile_name]
+    band = params["count_band"]
     count_score = band_score(n, band["ideal"], band["zero"])
     if n < band["ideal"][0]:
         feedback.append(f"Kaynak sayisi dusuk ({n}); alan icin beklenen en az {band['ideal'][0]:.0f}.")
     elif n > band["ideal"][1]:
         feedback.append(f"Kaynak sayisi cok yuksek ({n}); dogrudan iliskili olmayanlari ayiklayin.")
 
-    current_year = (today or date.today()).year
+    current_year = ctx.as_of.year
     years = [int(m[-1]) for m in (YEAR_RE.findall(e) for e in entries) if m]
     recent_share = sum(1 for y in years if y >= current_year - RECENT_YEARS) / len(years) if years else 0.0
-    recency_score = 100.0 if is_law else band_score(recent_share, RECENCY_BAND["ideal"], RECENCY_BAND["zero"])
-    if not is_law and recent_share < RECENCY_BAND["ideal"][0]:
+    recency_score = band_score(recent_share, RECENCY_BAND["ideal"], RECENCY_BAND["zero"]) if check_recency else 100.0
+    if check_recency and recent_share < RECENCY_BAND["ideal"][0]:
         feedback.append(f"Kaynaklarin yalnizca %{recent_share * 100:.0f}'i son {RECENT_YEARS} yila ait; guncel calismalari ekleyin.")
 
     citation_ratio = citations / n
@@ -109,8 +107,8 @@ def analyze(text: str, language: str, field: str | None = None, today: date | No
         feedback.append("Kaynak stili tutarsiz (numarali ve yazar-yil bicimleri karisik).")
 
     doi_share = sum(1 for e in entries if DOI_RE.search(e)) / n
-    doi_score = 100.0 if is_law else clamp(100 * doi_share / DOI_TARGET_SHARE)
-    if not is_law and doi_share < DOI_TARGET_SHARE:
+    doi_score = clamp(100 * doi_share / DOI_TARGET_SHARE) if check_doi else 100.0
+    if check_doi and doi_share < DOI_TARGET_SHARE:
         feedback.append(f"Kaynaklarin %{doi_share * 100:.0f}'inde DOI var; erisilebilirlik icin DOI ekleyin.")
 
     score = (
@@ -128,7 +126,7 @@ def analyze(text: str, language: str, field: str | None = None, today: date | No
         score=round(clamp(score), 1),
         feedback=feedback,
         metrics={
-            "field_profile": profile_name,
+            "field_profile": params["profile_label"],
             "entry_count": n,
             "in_text_citations": citations,
             "recent_share": round(recent_share, 2),

@@ -7,11 +7,19 @@ Modul: score_delivery - anlatim akisi ve akademik ton (proxy metrikler).
 
 Turkce cumleler eklemeli yapi nedeniyle kelime sayisi olarak daha kisadir ->
 bantlar dile gore ayri.
+params: yok (alandan bagimsiz).
 """
+from __future__ import annotations
+
 import re
 import statistics
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
 from app.services.analysis.text_utils import ModuleResult, band_score, clamp, normalize, tokenize
+
+if TYPE_CHECKING:
+    from app.services.analysis.context import Context
 
 LENGTH_BANDS = {
     "en": {"ideal": (15, 25), "zero": (6, 40)},
@@ -44,7 +52,8 @@ def _transition_patterns(lang: str) -> list[re.Pattern]:
     return [re.compile(rf"(?<!\w){re.escape(t)}(?!\w)") for t in TRANSITIONS[lang]]
 
 
-def analyze(sentences: list[str], tokens: list[str], language: str) -> ModuleResult:
+def analyze(ctx: Context, params: Mapping[str, Any]) -> ModuleResult:
+    sentences, tokens, language = ctx.sentences, ctx.tokens, ctx.language
     lang = language if language in LENGTH_BANDS else "en"
     feedback: list[str] = []
 

@@ -7,13 +7,19 @@ Olculenler:
   - Sinirliliklar, gelecek arastirma onerileri, kuramsal/uygulamaya donuk cikarimlar.
   - Bolumun metne orani.
 Kapsam: Sonuc bolumu; yoksa Tartisma (yari guven).
-Alan farki: hukukta sinirlilik beyani nadirdir -> agirligi cikarim/oneriye kayar,
-sonucta norm atfi daha olagan oldugu icin atif cezasi hafiftir.
+params:
+  citation_penalty   : sonuctaki her metin ici atif icin dusulecek puan
+  weights            : skor bilesen agirliklari (citations/limitations/future/implications/alignment/length)
+  expect_limitations : False -> sinirlilik beyani yoksa uyarilmaz
+  profile_label      : metrics.profile etiketi
 """
-import re
+from __future__ import annotations
 
-from app.services.analysis.modules.references import body_before_references, count_in_text_citations
-from app.services.analysis.modules.structure import extract_sections
+import re
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
+
+from app.services.analysis.modules.references import count_in_text_citations
 from app.services.analysis.text_utils import (
     ModuleResult,
     band_score,
@@ -23,6 +29,9 @@ from app.services.analysis.text_utils import (
     normalize,
     tokenize,
 )
+
+if TYPE_CHECKING:
+    from app.services.analysis.context import Context
 
 LIMITATION_RE = re.compile(
     r"\b(limitation|limited to|caveat|should be interpreted with caution|kısıtlılık|sınırlılık|sınırlı kalmaktadır)"
@@ -39,22 +48,10 @@ IMPLICATION_RE = re.compile(
 SECTION_RATIO_BAND = {"ideal": (0.04, 0.15), "zero": (0.01, 0.35)}
 NEW_CONCEPT_BAND = {"ideal": (0.0, 0.35), "zero": (-1.0, 0.70)}
 CONCEPT_MIN_LEN = 6  # kisa islev kelimelerini (into, should, appear) kavram sayma
-CITATION_PENALTY = {"default": 25, "law": 10}
-WEIGHTS = {
-    "default": {
-        "citations": 0.20, "limitations": 0.15, "future": 0.15,
-        "implications": 0.15, "alignment": 0.20, "length": 0.15,
-    },
-    "law": {
-        "citations": 0.15, "limitations": 0.05, "future": 0.15,
-        "implications": 0.25, "alignment": 0.25, "length": 0.15,
-    },
-}
 
 
-def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
-    profile = "law" if field == "law" else "default"
-    sections = extract_sections(text)
+def analyze(ctx: Context, params: Mapping[str, Any]) -> ModuleResult:
+    sections = ctx.sections
     feedback: list[str] = []
 
     if sections.get("conclusion"):
@@ -73,11 +70,11 @@ def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
             confidence=0.4,
         )
 
-    body = body_before_references(text)
+    body = ctx.body
     lowered = normalize(scope)
 
     citations = count_in_text_citations(scope)
-    citation_score = clamp(100 - CITATION_PENALTY[profile] * citations)
+    citation_score = clamp(100 - params["citation_penalty"] * citations)
     if citations and source == "conclusion":
         feedback.insert(0, f"Sonuc bolumunde {citations} metin ici atif var; sonuc yeni kaynak tanitmamali, bulgulari ozetlemeli.")
 
@@ -92,14 +89,14 @@ def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
     has_limitations = bool(LIMITATION_RE.search(lowered))
     has_future = bool(FUTURE_RE.search(lowered))
     has_implications = bool(IMPLICATION_RE.search(lowered))
-    if not has_limitations and profile != "law":
+    if not has_limitations and params["expect_limitations"]:
         feedback.append("Calismanin sinirliliklari (kisitliliklar) belirtilmemis.")
     if not has_future:
         feedback.append("Gelecek arastirmalar icin oneri yok.")
     if not has_implications:
         feedback.append("Kuramsal veya uygulamaya donuk cikarim/oneri yok.")
 
-    total_words = count_words(body)
+    total_words = ctx.body_word_count
     section_ratio = count_words(scope) / total_words if total_words else 0.0
     length_score = band_score(section_ratio, SECTION_RATIO_BAND["ideal"], SECTION_RATIO_BAND["zero"])
     if section_ratio < SECTION_RATIO_BAND["ideal"][0]:
@@ -107,7 +104,7 @@ def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
     elif section_ratio > SECTION_RATIO_BAND["ideal"][1]:
         feedback.append(f"Sonuc bolumu metnin %{section_ratio * 100:.0f}'i; bulgulari tekrar etmek yerine ozetleyin.")
 
-    w = WEIGHTS[profile]
+    w = params["weights"]
     score = (
         w["citations"] * citation_score
         + w["limitations"] * 100 * has_limitations
@@ -125,7 +122,7 @@ def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
         feedback=feedback,
         metrics={
             "scope": source,
-            "profile": profile,
+            "profile": params["profile_label"],
             "new_citations": citations,
             "new_concept_ratio": round(new_concepts, 2),
             "has_limitations": has_limitations,

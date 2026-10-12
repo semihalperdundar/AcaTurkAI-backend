@@ -3,15 +3,23 @@ Modul: score_methodology - yontem bolumunun tamligi.
 
 Olculenler: yontem bilesenlerinin varligi (desen, orneklem, veri toplama, analiz,
 gecerlik/guvenirlik, etik), orneklem buyuklugunun raporlanmasi, bolumun metne orani.
-Alan farki:
-  - health: etik kurul / onam zorunlu kabul edilir (agirligi yuksek).
-  - law: ayri bir yontem bolumu beklenmez; tum metinde yaklasim (doktrinel,
-    karsilastirmali, ictihat) ve birincil kaynak kullanimi aranir.
+params:
+  scope          : "section" -> yontem bolumu (yoksa tum metin, cezali);
+                   "body"    -> yontem metne yayilmis kabul edilir: tum metin, orneklem/oran yok
+  elements       : aranacak bilesenler ve agirliklari (ELEMENT_PATTERNS anahtarlari)
+  ethics_warning : etik bileseni yoksa masa basi ret uyarisi ekle
+  profile_label  : metrics.field_profile etiketi
 """
-import re
+from __future__ import annotations
 
-from app.services.analysis.modules.structure import extract_sections
+import re
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
+
 from app.services.analysis.text_utils import ModuleResult, band_score, clamp, count_words, normalize
+
+if TYPE_CHECKING:
+    from app.services.analysis.context import Context
 
 ELEMENT_PATTERNS: dict[str, re.Pattern] = {
     "design": re.compile(
@@ -49,11 +57,6 @@ ELEMENT_PATTERNS: dict[str, re.Pattern] = {
         r"kanun|yasa|mevzuat|anayasa|mahkeme|yargıtay|danıştay|uluslararası sözleşme|yönetmelik)"
     ),
 }
-FIELD_PROFILES: dict[str, dict[str, float]] = {
-    "default": {"design": 20, "sample": 20, "instruments": 20, "analysis": 25, "validity": 10, "ethics": 5},
-    "health": {"design": 15, "sample": 20, "instruments": 15, "analysis": 20, "validity": 10, "ethics": 20},
-    "law": {"approach": 60, "sources": 40},
-}
 ELEMENT_LABELS_TR = {
     "design": "arastirma deseni",
     "sample": "orneklem/katilimcilar",
@@ -77,19 +80,18 @@ def _sample_size(lowered: str) -> int | None:
     return int(match.group(1) or match.group(2)) if match else None
 
 
-def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
-    profile_name = field if field in FIELD_PROFILES else "default"
-    weights = FIELD_PROFILES[profile_name]
-    is_law = profile_name == "law"
+def analyze(ctx: Context, params: Mapping[str, Any]) -> ModuleResult:
+    weights = params["elements"]
+    whole_text = params["scope"] == "body"
     feedback: list[str] = []
 
-    section = extract_sections(text).get("methodology", "")
+    section = ctx.sections.get("methodology", "")
     has_section = bool(section)
-    # Hukukta yontem metne yayilir; diger alanlarda bolum yoksa tum metin taranir ama cezali.
-    scope = normalize(text if is_law or not has_section else section)
+    # scope=body: yontem metne yayilir; aksi halde bolum yoksa tum metin taranir ama cezali.
+    scope = normalize(ctx.text if whole_text or not has_section else section)
 
     found = {name: bool(ELEMENT_PATTERNS[name].search(scope)) for name in weights}
-    sample_size = None if is_law else _sample_size(scope)
+    sample_size = None if whole_text else _sample_size(scope)
     credit = {name: float(ok) for name, ok in found.items()}
     if found.get("sample") and sample_size is None:
         credit["sample"] = SAMPLE_WITHOUT_SIZE_CREDIT
@@ -99,14 +101,14 @@ def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
     missing = [n for n, ok in found.items() if not ok]
     if missing:
         feedback.insert(0, "Yontemde eksik bilesen: " + ", ".join(ELEMENT_LABELS_TR[n] for n in missing) + ".")
-    if profile_name == "health" and not found["ethics"]:
+    if params["ethics_warning"] and not found["ethics"]:
         feedback.append("Saglik alaninda etik kurul onayi ve onam beyani olmadan makale masa basinda reddedilebilir.")
 
-    total_words = count_words(text)
+    total_words = ctx.word_count
     section_ratio = count_words(section) / total_words if total_words else 0.0
-    if is_law:
+    if whole_text:
         score = 100 * coverage
-        confidence = 0.6  # hukuk yontemi anahtar kelimeden cok argumantasyonla anlasilir
+        confidence = 0.6  # metne yayilmis yontem anahtar kelimeden cok argumantasyonla anlasilir
     elif has_section:
         ratio_score = band_score(section_ratio, SECTION_RATIO_BAND["ideal"], SECTION_RATIO_BAND["zero"])
         if section_ratio < SECTION_RATIO_BAND["ideal"][0]:
@@ -125,7 +127,7 @@ def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
         score=round(clamp(score), 1),
         feedback=feedback,
         metrics={
-            "field_profile": profile_name,
+            "field_profile": params["profile_label"],
             "has_section": has_section,
             "elements_found": found,
             "sample_size": sample_size,

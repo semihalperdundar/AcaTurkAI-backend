@@ -4,10 +4,14 @@ Modul: score_title - baslik kalitesi.
 Olculenler: uzunluk (dile gore bant), baslik kavramlarinin ozet/giriste karsiligi,
 bicim (nokta ile bitis, tamami buyuk harf, belirsiz veya abartili ifade).
 Baslik = ilk tespit edilen bolum basligindan onceki ilk anlamli satir.
+params: yok (alandan bagimsiz).
 """
-import re
+from __future__ import annotations
 
-from app.services.analysis.modules.structure import detect_sections, extract_sections
+import re
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
+
 from app.services.analysis.text_utils import (
     ModuleResult,
     band_score,
@@ -17,6 +21,9 @@ from app.services.analysis.text_utils import (
     normalize,
     tokenize,
 )
+
+if TYPE_CHECKING:
+    from app.services.analysis.context import Context
 
 # Turkce eklemeli yapi -> ayni icerik daha az kelimeyle ifade edilir.
 LENGTH_BANDS = {
@@ -32,9 +39,9 @@ VAGUE_RE = re.compile(
 HYPE_RE = re.compile(r"\b(novel|groundbreaking|revolutionary|first ever|çığır açan|devrim niteliğinde)")
 
 
-def find_title(text: str) -> str | None:
-    lines = text.split("\n")
-    first_section = min(detect_sections(text).values(), default=len(lines))
+def find_title(ctx: Context) -> str | None:
+    lines = ctx.text.split("\n")
+    first_section = min(ctx.section_index.values(), default=len(lines))
     for line in lines[:first_section]:
         stripped = line.strip()
         if 2 <= count_words(stripped) <= TITLE_MAX_WORDS:
@@ -42,9 +49,9 @@ def find_title(text: str) -> str | None:
     return None
 
 
-def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
-    lang = language if language in LENGTH_BANDS else "en"
-    title = find_title(text)
+def analyze(ctx: Context, params: Mapping[str, Any]) -> ModuleResult:
+    lang = ctx.language if ctx.language in LENGTH_BANDS else "en"
+    title = find_title(ctx)
     if title is None:
         return ModuleResult(
             module="title",
@@ -65,8 +72,8 @@ def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
     elif word_count > band["ideal"][1]:
         feedback.append(f"Baslik uzun ({word_count} kelime); alt baslik kullanarak sadelestirin.")
 
-    sections = extract_sections(text)
-    reference = " ".join(sections.get(s, "") for s in ("abstract", "introduction")) or text[:5000]
+    sections = ctx.sections
+    reference = " ".join(sections.get(s, "") for s in ("abstract", "introduction")) or ctx.text[:5000]
     title_stems = content_stems(tokenize(title))
     overlap = len(title_stems & content_stems(tokenize(reference))) / len(title_stems) if title_stems else 0.0
     if overlap < 0.5:

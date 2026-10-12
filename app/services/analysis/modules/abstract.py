@@ -3,13 +3,22 @@ Modul: score_abstract - ozet kalitesi.
 
 Olculenler: uzunluk bandi, retorik hamleler (amac / yontem / bulgu / sonuc),
 anahtar kelime satiri, nicel bulgu (sayi) varligi.
-Alan farki: hukuk ozetlerinde yontem hamlesi beklenmez, bulgu yerine arguman aranir
-ve sayisal sonuc zorunlu degildir.
+params:
+  moves                : beklenen retorik hamleler (MOVE_PATTERNS anahtarlari)
+  require_quantitative : ozette sayisal bulgu yoksa geri bildirim uret
+  weights              : skor bilesen agirliklari (moves/length/keywords/quantitative)
+  profile_label        : metrics.field_profile etiketi
 """
-import re
+from __future__ import annotations
 
-from app.services.analysis.modules.structure import extract_sections
+import re
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
+
 from app.services.analysis.text_utils import ModuleResult, band_score, clamp, count_words, normalize
+
+if TYPE_CHECKING:
+    from app.services.analysis.context import Context
 
 LENGTH_BAND = {"ideal": (150, 300), "zero": (50, 500)}
 
@@ -33,10 +42,6 @@ MOVE_PATTERNS: dict[str, re.Pattern] = {
     ),
     "argument": re.compile(r"\b(argu|contend|propos|claim|savun|ileri sür|önerme|tartışıl)"),
 }
-FIELD_MOVES: dict[str, tuple[str, ...]] = {
-    "law": ("purpose", "argument", "conclusion"),
-}
-DEFAULT_MOVES = ("purpose", "method", "results", "conclusion")
 MOVE_LABELS_TR = {
     "purpose": "amac",
     "method": "yontem",
@@ -50,8 +55,8 @@ KEYWORDS_LINE_RE = re.compile(
 _NUMBER_RE = re.compile(r"\d")
 
 
-def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
-    abstract = extract_sections(text).get("abstract", "")
+def analyze(ctx: Context, params: Mapping[str, Any]) -> ModuleResult:
+    abstract = ctx.sections.get("abstract", "")
     if not abstract:
         return ModuleResult(
             module="abstract",
@@ -64,8 +69,8 @@ def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
         )
 
     feedback: list[str] = []
-    is_law = field == "law"
-    expected = FIELD_MOVES.get(field or "", DEFAULT_MOVES)
+    expected = params["moves"]
+    weights = params["weights"]
     lowered = normalize(abstract)
 
     # Anahtar kelime satiri ozet govdesine dahilse uzunluga sayilmaz.
@@ -83,18 +88,20 @@ def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
     if missing:
         feedback.insert(0, "Ozette eksik hamle: " + ", ".join(MOVE_LABELS_TR[m] for m in missing) + ".")
 
-    has_keywords = bool(KEYWORDS_LINE_RE.search(normalize(text)))
+    has_keywords = bool(KEYWORDS_LINE_RE.search(normalize(ctx.text)))
     if not has_keywords:
         feedback.append("Anahtar kelime (Keywords / Anahtar Kelimeler) satiri bulunamadi.")
 
     has_numbers = bool(_NUMBER_RE.search(body))
-    if not has_numbers and not is_law:
+    if not has_numbers and params["require_quantitative"]:
         feedback.append("Ozette nicel bulgu yok; temel sonucu sayisal olarak (orneklem, etki buyuklugu) verin.")
 
-    if is_law:
-        score = 0.60 * move_score + 0.30 * length_score + 0.10 * (100 * has_keywords)
-    else:
-        score = 0.50 * move_score + 0.30 * length_score + 0.10 * (100 * has_keywords) + 0.10 * (100 * has_numbers)
+    score = (
+        weights["moves"] * move_score
+        + weights["length"] * length_score
+        + weights["keywords"] * (100 * has_keywords)
+        + weights["quantitative"] * (100 * has_numbers)
+    )
 
     return ModuleResult(
         module="abstract",
@@ -107,7 +114,7 @@ def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
             "moves": moves,
             "has_keywords": has_keywords,
             "has_quantitative_result": has_numbers,
-            "field_profile": "law" if is_law else "empirical",
+            "field_profile": params["profile_label"],
         },
         confidence=0.85 if word_count >= 50 else 0.6,
     )

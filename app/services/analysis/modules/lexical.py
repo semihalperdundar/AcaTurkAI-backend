@@ -8,10 +8,18 @@ Modul: score_lexical - sozcuk cesitliligi ve akademik sozcuk yogunlugu.
 
 Bant esikleri v1 sezgiseldir; corpus normlari (corpus_works) olusunca alan
 bazli kalibre edilecek.
+params: yok (alandan bagimsiz).
 """
+from __future__ import annotations
+
 from collections import Counter
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
 from app.services.analysis.text_utils import ModuleResult, band_score, clamp, matches_stem
+
+if TYPE_CHECKING:
+    from app.services.analysis.context import Context
 
 MATTR_WINDOW = 100
 
@@ -73,7 +81,8 @@ def mattr(tokens: list[str], window: int = MATTR_WINDOW) -> float:
     return total / window / (len(tokens) - window + 1)
 
 
-def analyze(tokens: list[str], language: str) -> ModuleResult:
+def analyze(ctx: Context, params: Mapping[str, Any]) -> ModuleResult:
+    tokens, language = ctx.tokens, ctx.language
     lang = language if language in ACADEMIC_STEMS else "en"
     feedback: list[str] = []
 

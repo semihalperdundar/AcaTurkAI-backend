@@ -7,14 +7,21 @@ Olculenler:
   - Bolumler arasi tekrar: govdedeki tekrarlanan 6-kelimelik dizilerin orani.
   - Kaynakcaya gore sozcuk yeniligi: govde icerik koklerinden kaynakcada gecmeyenlerin orani.
 Ozgunluk kural tabanli olarak yalnizca dolayli olculebilir -> guven bilincli olarak dusuk.
-Alan farki: hukukta bosluk, tartismali/yerlesmemis ictihat ifadeleriyle de kurulur.
+params:
+  gap_pattern_sets : aranacak bosluk kalibi kumeleri (GAP_PATTERN_SETS anahtarlari);
+                     ornegin "legal_dispute" tartismali/yerlesmemis ictihat ifadelerini ekler
 """
+from __future__ import annotations
+
 import re
 from collections import Counter
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
-from app.services.analysis.modules.references import body_before_references
-from app.services.analysis.modules.structure import extract_sections
 from app.services.analysis.text_utils import ModuleResult, band_score, clamp, content_stems, normalize, tokenize
+
+if TYPE_CHECKING:
+    from app.services.analysis.context import Context
 
 GAP_PATTERNS: tuple[re.Pattern, ...] = tuple(
     re.compile(p)
@@ -31,6 +38,10 @@ LAW_GAP_PATTERN = re.compile(
     r"\b(controvers|unsettled|divergent case law|conflicting decisions|tartışmalı|içtihat farklılığı|"
     r"çelişkili karar|yerleşik değil|doktrinde görüş ayrılığı)"
 )
+GAP_PATTERN_SETS: dict[str, tuple[re.Pattern, ...]] = {
+    "general": GAP_PATTERNS,
+    "legal_dispute": (LAW_GAP_PATTERN,),
+}
 CONTRIBUTION_RE = re.compile(
     r"\b(contribut|this study (adds|extends|offers|provides)|we propose|katkı|katkı sağla|alana kazandır)"
 )
@@ -49,17 +60,16 @@ def repetition_ratio(tokens: list[str], n: int = SHINGLE) -> float:
     return sum(c for c in counts.values() if c > 1) / len(grams)
 
 
-def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
-    is_law = field == "law"
-    sections = extract_sections(text)
-    body = body_before_references(text)
+def analyze(ctx: Context, params: Mapping[str, Any]) -> ModuleResult:
+    sections = ctx.sections
+    body = ctx.body
     feedback: list[str] = []
 
     framing = " ".join(sections.get(s, "") for s in ("abstract", "introduction", "literature")).strip()
     framing_source = "abstract+introduction" if framing else "body"
     lowered = normalize(framing or body)
 
-    patterns = GAP_PATTERNS + ((LAW_GAP_PATTERN,) if is_law else ())
+    patterns = tuple(p for name in params["gap_pattern_sets"] for p in GAP_PATTERN_SETS[name])
     gap_hits = sum(1 for p in patterns if p.search(lowered))
     gap_score = 100 * min(1.0, gap_hits / GAP_TARGET)
     if gap_hits == 0:

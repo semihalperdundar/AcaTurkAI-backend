@@ -37,6 +37,8 @@ from app.services.analysis.modules import (
     structure,
     title,
 )
+from app.services.analysis.context import build_context
+from app.services.analysis.profiles import BASE, LAW, PROFILES, get_profile
 from app.services.analysis.text_extractor import TextExtractionError, extract_text
 from app.services.analysis.text_utils import (
     band_score,
@@ -130,6 +132,12 @@ def _minimal_pdf(text: str) -> bytes:
     return out
 
 
+def run(module, text, language=None, field=None, today=None):
+    """Tek modulu motorla ayni yoldan calistir: Context + alan profilinin o modul icin parametreleri."""
+    ctx = build_context(text, language=language, as_of=today)
+    return module.analyze(ctx, get_profile(field).params_for(module.__name__.rsplit(".", 1)[-1]))
+
+
 # --- text_utils -------------------------------------------------------------
 
 def test_tokenize_handles_turkish_dotted_i_and_apostrophe():
@@ -218,7 +226,7 @@ def test_extract_corrupt_pdf_raises_extraction_error(tmp_path):
 # --- modules ----------------------------------------------------------------
 
 def test_structure_detects_imrad_sections():
-    result = structure.analyze(IMRAD_EN, "en")
+    result = run(structure, IMRAD_EN, "en")
     assert result.metrics["sections_found"] == [
         "abstract", "introduction", "methodology", "results", "conclusion", "references",
     ]
@@ -227,12 +235,12 @@ def test_structure_detects_imrad_sections():
 
 
 def test_structure_turkish_headings():
-    result = structure.analyze(IMRAD_TR, "tr")
+    result = run(structure, IMRAD_TR, "tr")
     assert set(result.metrics["sections_found"]) >= {"abstract", "introduction", "methodology", "results", "conclusion"}
 
 
 def test_structure_penalizes_missing_sections_and_low_confidence():
-    result = structure.analyze(UNSTRUCTURED_EN, "en")
+    result = run(structure, UNSTRUCTURED_EN, "en")
     assert result.score < 30
     assert result.agent_review["confidence"] <= 0.3
     assert result.feedback
@@ -240,8 +248,8 @@ def test_structure_penalizes_missing_sections_and_low_confidence():
 
 def test_structure_law_profile_does_not_require_imrad():
     law_text = "\n".join(["Abstract", BODY_EN, "Introduction", BODY_EN, "Conclusion", CONCLUSION_EN, "References"])
-    assert structure.analyze(law_text, "en", field="law").score == 100
-    assert structure.analyze(law_text, "en", field="education").score < 100
+    assert run(structure, law_text, "en", field="law").score == 100
+    assert run(structure, law_text, "en", field="education").score < 100
 
 
 def test_lexical_mattr_is_length_independent():
@@ -251,18 +259,16 @@ def test_lexical_mattr_is_length_independent():
 
 
 def test_lexical_flags_low_diversity_and_overuse():
-    repetitive = tokenize("the data shows the data and the data is data. " * 60)
-    result = lexical.analyze(repetitive, "en")
+    result = run(lexical, "the data shows the data and the data is data. " * 60, "en")
     assert result.score < 60
     assert "data" in result.metrics["overused_words"]
 
 
 def test_delivery_penalizes_informal_long_sentences():
-    academic_tokens = tokenize(IMRAD_EN)
-    academic = delivery.analyze(split_sentences(IMRAD_EN), academic_tokens, "en")
+    academic = run(delivery, IMRAD_EN, "en")
 
     rambling = ("I think this is really great and I don't know why but my results " * 6 + "! ") * 20
-    informal = delivery.analyze(split_sentences(rambling), tokenize(rambling), "en")
+    informal = run(delivery, rambling, "en")
 
     assert academic.score > informal.score
     assert informal.metrics["informal_markers_per_1000"] > 0
@@ -302,6 +308,49 @@ def test_engine_overall_is_weighted_mean_of_module_scores():
     assert report["overall_score"] == pytest.approx(expected, abs=0.05)
 
 
+# --- context / domain profiles ----------------------------------------------
+
+@pytest.mark.parametrize("profile", [BASE, *PROFILES.values()], ids=lambda p: p.name)
+def test_every_profile_covers_all_modules_with_weights_summing_to_one(profile):
+    assert set(profile.weights) == set(EVALUATED_MODULES)
+    assert sum(profile.weights.values()) == pytest.approx(1.0)
+    assert set(profile.params) == set(EVALUATED_MODULES)
+
+
+def test_profile_registry_matches_user_area_codes_and_falls_back_to_base():
+    assert set(PROFILES) == {"education", "social_sciences", "engineering", "health", "law", "business"}
+    assert get_profile(None) is BASE
+    assert get_profile("astrology") is BASE
+    assert get_profile("law") is LAW
+
+
+def test_profile_extend_overrides_keys_and_inherits_the_rest():
+    # law yalnizca degisen anahtarlari yazar; geri kalanlar BASE'ten gelir.
+    assert LAW.params_for("methodology")["elements"] == {"approach": 60, "sources": 40}
+    assert LAW.params_for("methodology")["ethics_warning"] is False  # BASE'ten miras
+    assert LAW.params_for("title") == BASE.params_for("title")
+
+    child = LAW.extend("law_custom", params={"references": {"check_doi": True}})
+    assert child.params_for("references")["check_doi"] is True
+    assert child.params_for("references")["check_recency"] is False  # LAW'dan miras
+    assert LAW.params_for("references")["check_doi"] is False  # ebeveyn degismez
+
+
+def test_module_params_are_read_only():
+    params = BASE.params_for("methodology")
+    with pytest.raises(TypeError):
+        params["scope"] = "body"
+
+
+def test_context_parses_sections_once_and_splits_body_at_references():
+    ctx = build_context(IMRAD_EN)
+    assert list(ctx.sections) == ["abstract", "introduction", "methodology", "results", "conclusion", "references"]
+    assert "Smith, J. (2020)" in ctx.sections["references"]
+    assert "Smith, J. (2020)" not in ctx.body
+    assert ctx.body_word_count < ctx.word_count
+    assert ctx.language == "en"
+
+
 # --- modules: title / abstract / methodology / references -------------------
 
 RICH_ABSTRACT = (
@@ -322,32 +371,32 @@ CITED_BODY = " ".join(f"Prior work supports this (Author{chr(65 + i % 26)}, {201
 
 
 def test_title_scores_and_flags_form_issues():
-    good = title.analyze(IMRAD_EN, "en")
+    good = run(title, IMRAD_EN, "en")
     assert good.metrics["title"] == "Structured Feedback and Student Achievement"
     assert good.metrics["concept_overlap"] == 1.0
 
     bad_text = IMRAD_EN.replace(
         "Structured Feedback and Student Achievement", "A NOVEL STUDY OF SOME ASPECTS OF LEARNING."
     )
-    bad = title.analyze(bad_text, "en")
+    bad = run(title, bad_text, "en")
     assert bad.score < good.score
     assert bad.metrics["ends_with_period"] and bad.metrics["all_caps"]
     assert bad.metrics["vague_phrase"] and bad.metrics["hype_phrase"]
 
 
 def test_title_missing_returns_zero_with_low_confidence():
-    result = title.analyze(IMRAD_TR, "tr")
+    result = run(title, IMRAD_TR, "tr")
     assert result.score == 0 and result.confidence <= 0.3
 
 
 def test_abstract_detects_moves_keywords_and_numbers():
-    result = abstract.analyze(RICH_ABSTRACT + "Introduction\n" + BODY_EN, "en")
+    result = run(abstract, RICH_ABSTRACT + "Introduction\n" + BODY_EN, "en")
     assert all(result.metrics["moves"].values())
     assert result.metrics["has_keywords"] and result.metrics["has_quantitative_result"]
     assert 150 <= result.metrics["word_count"] <= 300
     assert result.score >= 90
 
-    thin = abstract.analyze(IMRAD_EN, "en")
+    thin = run(abstract, IMRAD_EN, "en")
     assert thin.score < result.score
     assert any("eksik hamle" in f for f in thin.feedback)
 
@@ -357,18 +406,18 @@ def test_abstract_law_profile_does_not_require_method_or_numbers():
         "Abstract\nThis article examines the constitutional limits of emergency decrees. "
         "It argues that judicial review must remain available, and therefore proposes a narrower reading. " * 8
     )
-    result = abstract.analyze(law_abstract, "en", field="law")
+    result = run(abstract, law_abstract, "en", field="law")
     assert set(result.metrics["moves"]) == {"purpose", "argument", "conclusion"}
     assert not any("nicel" in f for f in result.feedback)
 
 
 def test_abstract_missing():
-    assert abstract.analyze(UNSTRUCTURED_EN, "en").score == 0
+    assert run(abstract, UNSTRUCTURED_EN, "en").score == 0
 
 
 def test_methodology_detects_sample_size_and_penalizes_missing_section():
-    structured = methodology.analyze(IMRAD_EN, "en", field="education")
-    unstructured = methodology.analyze(UNSTRUCTURED_EN, "en", field="education")
+    structured = run(methodology, IMRAD_EN, "en", field="education")
+    unstructured = run(methodology, UNSTRUCTURED_EN, "en", field="education")
     assert structured.metrics["sample_size"] == 214
     assert structured.metrics["has_section"] and not unstructured.metrics["has_section"]
     assert structured.score > unstructured.score
@@ -376,22 +425,22 @@ def test_methodology_detects_sample_size_and_penalizes_missing_section():
 
 
 def test_methodology_health_profile_requires_ethics():
-    default = methodology.analyze(IMRAD_EN, "en", field="education")
-    health = methodology.analyze(IMRAD_EN, "en", field="health")
+    default = run(methodology, IMRAD_EN, "en", field="education")
+    health = run(methodology, IMRAD_EN, "en", field="health")
     assert health.score < default.score
     assert any("etik kurul" in f.lower() for f in health.feedback)
 
     with_ethics = IMRAD_EN.replace(
         "Participants were 214", "The study was approved by the ethics committee and informed consent was obtained. Participants were 214"
     )
-    assert methodology.analyze(with_ethics, "en", field="health").score > health.score
+    assert run(methodology, with_ethics, "en", field="health").score > health.score
 
 
 def test_methodology_law_profile_searches_whole_text_for_legal_method():
     law_text = "Introduction\n" + (
         "This article adopts a doctrinal and comparative approach, analysing statute law and court decisions. " * 5
     )
-    result = methodology.analyze(law_text, "en", field="law")
+    result = run(methodology, law_text, "en", field="law")
     assert result.metrics["field_profile"] == "law"
     assert result.metrics["elements_found"] == {"approach": True, "sources": True}
     assert result.score == 100
@@ -399,7 +448,7 @@ def test_methodology_law_profile_searches_whole_text_for_legal_method():
 
 def test_references_scores_well_formed_cited_bibliography():
     text = "Introduction\n" + CITED_BODY + "\nReferences\n" + GOOD_REFERENCES
-    result = references.analyze(text, "en", today=date(2026, 10, 5))
+    result = run(references, text, "en", today=date(2026, 10, 5))
     assert result.metrics["entry_count"] == 30
     assert result.metrics["in_text_citations"] == 30
     assert result.metrics["style"] == "author_year" and result.metrics["style_consistency"] == 1.0
@@ -412,7 +461,7 @@ def test_references_flags_old_uncited_mixed_style_entries():
         [f"[{i}] Author{i}, B. Old study. Journal, 1(1), 1-9, {1990 + i}." for i in range(1, 6)]
         + [f"Writer{i}, C. ({1995 + i}). Another study. Journal, 2(1), 1-9." for i in range(5)]
     )
-    result = references.analyze("Introduction\nNo citations here.\nReferences\n" + entries, "en", today=date(2026, 10, 5))
+    result = run(references, "Introduction\nNo citations here.\nReferences\n" + entries, "en", today=date(2026, 10, 5))
     assert result.metrics["entry_count"] == 10
     assert result.metrics["recent_share"] == 0
     assert result.metrics["style_consistency"] == 0.5
@@ -421,7 +470,7 @@ def test_references_flags_old_uncited_mixed_style_entries():
 
 
 def test_references_heading_without_entries():
-    result = references.analyze(IMRAD_TR, "tr")
+    result = run(references, IMRAD_TR, "tr")
     assert result.score == 0
     assert result.feedback[0] == "Kaynakca basligi var ama girdi bulunamadi."
 
@@ -430,8 +479,8 @@ def test_references_law_ignores_recency_and_doi():
     old_refs = "\n".join(f"Jurist{chr(65 + i % 26)}, A. ({1960 + i}). Treatise on law {i}. Ankara." for i in range(40))
     body = " ".join(f"(Jurist{chr(65 + i % 26)}, {1960 + i})" for i in range(40))
     text = "Introduction\n" + body + "\nReferences\n" + old_refs
-    law = references.analyze(text, "tr", field="law", today=date(2026, 10, 5))
-    default = references.analyze(text, "tr", field="education", today=date(2026, 10, 5))
+    law = run(references, text, "tr", field="law", today=date(2026, 10, 5))
+    default = run(references, text, "tr", field="education", today=date(2026, 10, 5))
     assert law.score > default.score
     assert not any("DOI" in f for f in law.feedback)
 
@@ -470,23 +519,23 @@ GOOD_CONCLUSION_EN = (
 
 def test_literature_rewards_cited_synthesised_review():
     text = GAP_INTRO_EN + LIT_REVIEW_EN + "\n" + METHOD_EN * 4 + "\n" + RICH_RESULTS_EN
-    result = literature.analyze(text, "en", field="education")
+    result = run(literature, text, "en", field="education")
     assert result.metrics["scope"] == "literature"
     assert result.metrics["multi_source_citations"] == 8
     assert result.metrics["synthesis_phrase_groups"] >= 2
-    assert result.score > literature.analyze(IMRAD_EN, "en", field="education").score
+    assert result.score > run(literature, IMRAD_EN, "en", field="education").score
 
 
 def test_literature_falls_back_to_introduction_and_flags_missing_citations():
-    result = literature.analyze(IMRAD_EN, "en", field="education")
+    result = run(literature, IMRAD_EN, "en", field="education")
     assert result.metrics["scope"] == "introduction"
     assert result.metrics["in_text_citations"] == 0
     assert any("atif yok" in f for f in result.feedback)
-    assert literature.analyze(UNSTRUCTURED_EN, "en").score == 0
+    assert run(literature, UNSTRUCTURED_EN, "en").score == 0
 
 
 def test_literature_law_scans_body_without_ratio():
-    result = literature.analyze(LIT_REVIEW_EN + "\nConclusion\n" + CONCLUSION_EN, "en", field="law")
+    result = run(literature, LIT_REVIEW_EN + "\nConclusion\n" + CONCLUSION_EN, "en", field="law")
     assert result.metrics["scope"] == "body"
     assert result.metrics["section_ratio"] is None
 
@@ -498,8 +547,8 @@ def test_originality_repetition_ratio():
 
 def test_originality_rewards_gap_contribution_and_low_repetition():
     text = "Abstract\n" + RICH_ABSTRACT + GAP_INTRO_EN + LIT_REVIEW_EN + "\n" + RICH_RESULTS_EN
-    strong = originality.analyze(text, "en")
-    weak = originality.analyze(IMRAD_EN, "en")
+    strong = run(originality, text, "en")
+    weak = run(originality, IMRAD_EN, "en")
     assert strong.metrics["gap_indicator_groups"] >= 2
     assert strong.metrics["has_contribution_statement"]
     assert weak.metrics["repetition_ratio"] > 0.5  # fixture tekrarli bloklardan olusuyor
@@ -509,17 +558,17 @@ def test_originality_rewards_gap_contribution_and_low_repetition():
 
 def test_originality_law_accepts_unsettled_case_law_as_gap():
     text = "Introduction\nThe question remains controversial and the case law is unsettled in Turkish doctrine.\n"
-    assert originality.analyze(text, "en", field="law").metrics["gap_indicator_groups"] == 1
-    assert originality.analyze(text, "en", field="education").metrics["gap_indicator_groups"] == 0
+    assert run(originality, text, "en", field="law").metrics["gap_indicator_groups"] == 1
+    assert run(originality, text, "en", field="education").metrics["gap_indicator_groups"] == 0
 
 
 def test_findings_quantitative_profile_rewards_statistics():
     text = "Introduction\n" + BODY_EN * 2 + "\nMethodology\n" + METHOD_EN * 2 + "\n" + RICH_RESULTS_EN
-    rich = findings.analyze(text, "en", field="health")
+    rich = run(findings, text, "en", field="health")
     assert rich.metrics["profile"] == "quantitative"
     assert rich.metrics["stat_marker_groups"] >= 4
     assert rich.metrics["table_figure_refs"]
-    assert rich.score > findings.analyze(IMRAD_EN, "en", field="health").score
+    assert rich.score > run(findings, IMRAD_EN, "en", field="health").score
 
 
 def test_findings_qualitative_profile_uses_quotes_and_themes():
@@ -528,7 +577,7 @@ def test_findings_qualitative_profile_uses_quotes_and_themes():
         f"Theme {i}: participants valued timely comments. P{i} said {quote}." for i in range(1, 6)
     )
     text = "Methodology\nWe conducted semi-structured interviews and a thematic analysis.\n" + results
-    result = findings.analyze(text, "en", field="education")
+    result = run(findings, text, "en", field="education")
     assert result.metrics["profile"] == "qualitative"
     assert result.metrics["quotes"] == 5 and result.metrics["participant_codes"] == 5
     assert result.score >= 70
@@ -538,25 +587,25 @@ def test_findings_law_profile_counts_legal_references():
     text = "Introduction\n" + " ".join(
         f"Under Article {i} of the Code, Yargıtay held in E. 2019/{i} that the clause is void." for i in range(1, 7)
     )
-    result = findings.analyze(text, "en", field="law")
+    result = run(findings, text, "en", field="law")
     assert result.metrics["profile"] == "law"
     assert result.metrics["legal_references"] >= 6
     assert "section_ratio" not in result.metrics
 
 
 def test_findings_missing_section_is_halved():
-    result = findings.analyze(UNSTRUCTURED_EN, "en")
+    result = run(findings, UNSTRUCTURED_EN, "en")
     assert result.metrics["scope"] is None
     assert result.confidence == 0.4
 
 
 def test_conclusions_rewards_limitations_future_work_and_no_new_citations():
     base = "Introduction\n" + BODY_EN * 3 + "\n" + RICH_RESULTS_EN
-    good = conclusions.analyze(base + GOOD_CONCLUSION_EN, "en")
+    good = run(conclusions, base + GOOD_CONCLUSION_EN, "en")
     assert good.metrics["has_limitations"] and good.metrics["has_future_research"] and good.metrics["has_implications"]
     assert good.metrics["new_citations"] == 0
 
-    cited = conclusions.analyze(
+    cited = run(conclusions, 
         base + GOOD_CONCLUSION_EN.replace("disciplines.", "disciplines (Smith, 2021; Lee, 2022)."), "en"
     )
     assert cited.metrics["new_citations"] == 1
@@ -565,16 +614,16 @@ def test_conclusions_rewards_limitations_future_work_and_no_new_citations():
 
 
 def test_conclusions_detects_turkish_obligation_mood_as_implication():
-    result = conclusions.analyze(IMRAD_TR, "tr")
+    result = run(conclusions, IMRAD_TR, "tr")
     assert result.metrics["has_implications"]  # "dahil edilmelidir"
 
 
 def test_conclusions_law_profile_and_missing_section():
     text = "Introduction\n" + BODY_EN + "\nConclusion\nThe legislature should amend the statute.\n"
-    law = conclusions.analyze(text, "en", field="law")
+    law = run(conclusions, text, "en", field="law")
     assert law.metrics["profile"] == "law"
     assert not any("sinirliliklari" in f for f in law.feedback)
-    assert conclusions.analyze(UNSTRUCTURED_EN, "en").score == 0
+    assert run(conclusions, UNSTRUCTURED_EN, "en").score == 0
 
 
 # --- service (status transitions) -------------------------------------------

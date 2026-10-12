@@ -6,14 +6,22 @@ Uc profil:
     isaretleri (p <, β, CI, anlamli), tablo/sekil atfi, bolumun metne orani.
   - qualitative: alinti (dogrudan ifade), katilimci kodlari (P3, K5), tema/kategori dili.
     Metin nitel isaretleri istatistik isaretlerinden fazla iceriyorsa secilir.
-  - law: mevzuat/ictihat atiflari (madde, m. 12, Yargitay, E./K.) ve alinti; ayri bulgular
+  - legal: mevzuat/ictihat atiflari (madde, m. 12, Yargitay, E./K.) ve alinti; ayri bulgular
     bolumu beklenmez, tum govde taranir ve oran olculmez.
+params:
+  evidence_profile : "auto" -> nicel/nitel metinden secilir; "legal" -> hukuki kanit profili
+  profile_label    : legal profilde metrics.profile etiketi (auto'da secilen profil yazilir)
 """
-import re
+from __future__ import annotations
 
-from app.services.analysis.modules.references import body_before_references
-from app.services.analysis.modules.structure import extract_sections
+import re
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
+
 from app.services.analysis.text_utils import ModuleResult, band_score, clamp, count_words, normalize
+
+if TYPE_CHECKING:
+    from app.services.analysis.context import Context
 
 SECTION_RATIO_BAND = {"ideal": (0.15, 0.40), "zero": (0.03, 0.65)}
 NUMBER_DENSITY_BAND = {"ideal": (1.5, 8.0), "zero": (0.2, 20.0)}
@@ -43,21 +51,20 @@ _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?\s*%?")
 QUALITATIVE_METHOD_RE = re.compile(r"\b(qualitative|interview|thematic|nitel|görüşme|tematik|fenomenoloji)")
 
 
-def _profile(field: str | None, text_lowered: str) -> str:
-    if field == "law":
-        return "law"
+def _detect_profile(text_lowered: str) -> str:
     stat_hits = sum(1 for p in STAT_PATTERNS if p.search(text_lowered))
     qual_hits = len(QUAL_MARKER_RE.findall(text_lowered)) + len(QUALITATIVE_METHOD_RE.findall(text_lowered))
     return "qualitative" if qual_hits > stat_hits and QUALITATIVE_METHOD_RE.search(text_lowered) else "quantitative"
 
 
-def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
-    sections = extract_sections(text)
-    body = body_before_references(text)
-    profile = _profile(field, normalize(body))
+def analyze(ctx: Context, params: Mapping[str, Any]) -> ModuleResult:
+    sections = ctx.sections
+    body = ctx.body
+    legal = params["evidence_profile"] == "legal"
+    profile = params["profile_label"] if legal else _detect_profile(normalize(body))
     feedback: list[str] = []
 
-    if profile == "law":
+    if legal:
         scope, source = body, "body"
     elif sections.get("results"):
         scope, source = sections["results"], "results"
@@ -70,13 +77,13 @@ def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
 
     lowered = normalize(scope)
     scope_words = count_words(scope)
-    total_words = count_words(body)
+    total_words = ctx.body_word_count
     section_ratio = scope_words / total_words if total_words else 0.0
     ratio_score = band_score(section_ratio, SECTION_RATIO_BAND["ideal"], SECTION_RATIO_BAND["zero"])
     quotes = len(QUOTE_RE.findall(scope))
     metrics: dict = {"profile": profile, "scope": source, "scope_words": scope_words, "quotes": quotes}
 
-    if profile == "law":
+    if legal:
         legal_refs = len(LAW_REFERENCE_RE.findall(lowered))
         if legal_refs < 5:
             feedback.insert(0, f"Mevzuat/ictihat atfi az ({legal_refs}); hukuki tespitler norm ve kararlara dayandirilmali.")
@@ -111,7 +118,7 @@ def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
         )
         metrics.update(numbers_per_100_words=round(density, 2), stat_marker_groups=stat_groups, table_figure_refs=has_tables)
 
-    if profile != "law":
+    if not legal:
         metrics["section_ratio"] = round(section_ratio, 3)
         if source and section_ratio < SECTION_RATIO_BAND["ideal"][0]:
             feedback.append(f"Bulgular metnin yalnizca %{section_ratio * 100:.0f}'i; temel sonuclar orantisiz kisa.")

@@ -1,14 +1,15 @@
 """
-Analiz motoru: metin -> kural tabanli moduller -> agirlikli genel skor -> full_report.
+Analiz motoru: metin -> Context (tek ayristirma) -> alan profili -> 11 kural tabanli modul
+-> agirlikli genel skor -> full_report.
 
 Saf fonksiyon (DB/dosya/ag yok) -> dogrudan birim test edilebilir.
-MODULE_WEIGHTS spec Bolum 5'teki 11 modulun TAMAMINI kapsar ve toplami 1.0'dir.
-Genel skor yalnizca uygulanmis modullerin (ANALYZERS) agirliklari uzerinden yeniden
-normalize edilir -> yeni modul eklendikce mevcut skorlar kirilmaz.
+Moduller alan adini bilmez: her biri analyze(ctx, params) imzasiyla, profilin kendisine
+verdigi parametrelerle calisir (bkz. profiles.py). Yeni alan eklemek bu dosyaya dokunmaz.
 """
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from typing import Any
 
+from app.services.analysis.context import Context, build_context
 from app.services.analysis.modules import (
     abstract,
     conclusions,
@@ -22,77 +23,59 @@ from app.services.analysis.modules import (
     structure,
     title,
 )
-from app.services.analysis.text_utils import ModuleResult, detect_language, split_sentences, tokenize, verdict_for
+from app.services.analysis.profiles import BASE, MODULE_WEIGHTS, DomainProfile, get_profile
+from app.services.analysis.text_utils import ModuleResult, verdict_for
 
 ENGINE_VERSION = "1.2.0"
 
-MODULE_WEIGHTS: dict[str, float] = {
-    "title": 0.05,
-    "abstract": 0.10,
-    "structure": 0.10,
-    "literature": 0.10,
-    "originality": 0.10,
-    "methodology": 0.15,
-    "findings": 0.12,
-    "conclusions": 0.08,
-    "references": 0.07,
-    "lexical": 0.06,
-    "delivery": 0.07,
-}
+Analyzer = Callable[[Context, Mapping[str, Any]], ModuleResult]
 
-
-@dataclass(frozen=True)
-class _Context:
-    text: str
-    tokens: list[str]
-    sentences: list[str]
-    language: str
-    field: str | None
-
-
-ANALYZERS: dict[str, Callable[[_Context], ModuleResult]] = {
-    "title": lambda c: title.analyze(c.text, c.language, c.field),
-    "abstract": lambda c: abstract.analyze(c.text, c.language, c.field),
-    "structure": lambda c: structure.analyze(c.text, c.language, c.field),
-    "literature": lambda c: literature.analyze(c.text, c.language, c.field),
-    "originality": lambda c: originality.analyze(c.text, c.language, c.field),
-    "methodology": lambda c: methodology.analyze(c.text, c.language, c.field),
-    "findings": lambda c: findings.analyze(c.text, c.language, c.field),
-    "conclusions": lambda c: conclusions.analyze(c.text, c.language, c.field),
-    "references": lambda c: references.analyze(c.text, c.language, c.field),
-    "lexical": lambda c: lexical.analyze(c.tokens, c.language),
-    "delivery": lambda c: delivery.analyze(c.sentences, c.tokens, c.language),
+# Sira = rapordaki modul ve yayin kurulu sirasi.
+ANALYZERS: dict[str, Analyzer] = {
+    "title": title.analyze,
+    "abstract": abstract.analyze,
+    "structure": structure.analyze,
+    "literature": literature.analyze,
+    "originality": originality.analyze,
+    "methodology": methodology.analyze,
+    "findings": findings.analyze,
+    "conclusions": conclusions.analyze,
+    "references": references.analyze,
+    "lexical": lexical.analyze,
+    "delivery": delivery.analyze,
 }
 EVALUATED_MODULES = tuple(ANALYZERS)
 NOT_YET_EVALUATED = tuple(name for name in MODULE_WEIGHTS if name not in ANALYZERS)
 
 
-def effective_weights() -> dict[str, float]:
+def effective_weights(profile: DomainProfile = BASE) -> dict[str, float]:
     """Uygulanmis modullerin agirliklari, toplami 1.0 olacak sekilde normalize."""
-    total = sum(MODULE_WEIGHTS[name] for name in EVALUATED_MODULES)
-    return {name: MODULE_WEIGHTS[name] / total for name in EVALUATED_MODULES}
+    total = sum(profile.weights[name] for name in EVALUATED_MODULES)
+    return {name: profile.weights[name] / total for name in EVALUATED_MODULES}
+
+
+def run_modules(ctx: Context, profile: DomainProfile) -> dict[str, ModuleResult]:
+    return {name: analyze(ctx, profile.params_for(name)) for name, analyze in ANALYZERS.items()}
 
 
 def analyze_text(text: str, field: str | None = None) -> dict:
-    tokens = tokenize(text)
-    language = detect_language(tokens)
+    ctx = build_context(text)
+    profile = get_profile(field)
+    results = run_modules(ctx, profile)
 
-    context = _Context(text, tokens, split_sentences(text), language, field)
-    results = {name: run(context) for name, run in ANALYZERS.items()}
-
-    weights = effective_weights()
+    weights = effective_weights(profile)
     overall = round(sum(r.score * weights[name] for name, r in results.items()), 1)
     reviews = [r.agent_review for r in results.values()]
 
     return {
         "engine_version": ENGINE_VERSION,
-        "language": language,
+        "language": ctx.language,
         "field": field,
-        "word_count": len(tokens),
+        "word_count": len(ctx.tokens),
         "overall_score": overall,
         "rejection_risk_score": round(100 - overall, 1),
         "weights": {name: round(w, 4) for name, w in weights.items()},
-        "configured_weights": MODULE_WEIGHTS,
+        "configured_weights": dict(profile.weights),  # JSONB'ye yazilir -> duz dict
         "modules": {name: r.to_dict() for name, r in results.items()},
         "editorial_board": {
             "decision": verdict_for(overall),

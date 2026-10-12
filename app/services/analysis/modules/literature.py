@@ -3,20 +3,24 @@ Modul: score_literature - alanyazin taramasinin derinligi ve sentezi.
 
 Olculenler: alanyazin kapsaminin metne orani, 100 kelime basina metin ici atif
 yogunlugu, coklu kaynakli atif (sentez) orani, kronolojik/karsilastirmali ifadeler.
-Kapsam: ayri alanyazin bolumu varsa o, yoksa Giris (bircok makale ikisini birlestirir).
-Alan farki: hukukta alanyazin argumantasyona yayilir -> tum govde taranir, oran olculmez.
+params:
+  scope        : "review" -> ayri alanyazin bolumu, yoksa Giris (bircok makale ikisini birlestirir);
+                 "body"   -> alanyazin argumantasyona yayilmis: tum govde taranir, oran olculmez
+  density_band : 100 kelime basina atif bandi {"ideal": (lo, hi), "zero": (lo, hi)}
 """
-import re
+from __future__ import annotations
 
-from app.services.analysis.modules.references import body_before_references, count_in_text_citations
-from app.services.analysis.modules.structure import extract_sections
+import re
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
+
+from app.services.analysis.modules.references import count_in_text_citations
 from app.services.analysis.text_utils import ModuleResult, band_score, clamp, count_words, normalize
 
+if TYPE_CHECKING:
+    from app.services.analysis.context import Context
+
 SECTION_RATIO_BAND = {"ideal": (0.10, 0.30), "zero": (0.02, 0.55)}
-DENSITY_BANDS = {
-    "default": {"ideal": (1.0, 4.0), "zero": (0.1, 8.0)},
-    "law": {"ideal": (0.5, 4.0), "zero": (0.05, 8.0)},
-}
 SYNTHESIS_PHRASES_TARGET = 3
 
 SYNTHESIS_PATTERNS: tuple[re.Pattern, ...] = tuple(
@@ -33,12 +37,12 @@ SYNTHESIS_PATTERNS: tuple[re.Pattern, ...] = tuple(
 _MULTI_SOURCE_RE = re.compile(r"\([^()]*(?:19|20)\d{2}[a-z]?\s*;[^()]*(?:19|20)\d{2}[a-z]?\)")
 
 
-def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
-    is_law = field == "law"
-    sections = extract_sections(text)
-    body = body_before_references(text)
+def analyze(ctx: Context, params: Mapping[str, Any]) -> ModuleResult:
+    whole_body = params["scope"] == "body"
+    sections = ctx.sections
+    body = ctx.body
 
-    if is_law:
+    if whole_body:
         scope, source = body, "body"
     elif sections.get("literature"):
         scope, source = sections["literature"], "literature"
@@ -60,12 +64,12 @@ def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
 
     feedback: list[str] = []
     scope_words = count_words(scope)
-    total_words = count_words(body)
+    total_words = ctx.body_word_count
     section_ratio = scope_words / total_words if total_words else 0.0
 
     citations = count_in_text_citations(scope)
     density = 100 * citations / scope_words if scope_words else 0.0
-    band = DENSITY_BANDS["law" if is_law else "default"]
+    band = params["density_band"]
     density_score = band_score(density, band["ideal"], band["zero"])
     if citations == 0:
         feedback.insert(0, "Alanyazin kapsaminda metin ici atif yok; iddialar kaynaga dayandirilmamis.")
@@ -84,7 +88,7 @@ def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
             "('onceki calismalar', 'in contrast', 'son yillarda') ve coklu atif (A, 2019; B, 2021) az."
         )
 
-    if is_law:
+    if whole_body:
         score = 0.55 * density_score + 0.45 * synthesis_score
         ratio_score = None
     else:
@@ -107,7 +111,7 @@ def analyze(text: str, language: str, field: str | None = None) -> ModuleResult:
         metrics={
             "scope": source,
             "scope_words": scope_words,
-            "section_ratio": None if is_law else round(section_ratio, 3),
+            "section_ratio": None if whole_body else round(section_ratio, 3),
             "in_text_citations": citations,
             "citations_per_100_words": round(density, 2),
             "multi_source_citations": multi_source,
