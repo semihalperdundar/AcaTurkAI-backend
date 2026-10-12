@@ -11,6 +11,7 @@ from app.models.journal import Journal  # noqa: F401
 from app.models.subscription import Subscription  # noqa: F401
 from app.models.usage_log import UsageLog  # noqa: F401
 from app.models.corpus import Author, CorpusWork, WorkAuthor, JournalQuartileHistory  # noqa: F401
+from app.models.insight_cache import InsightCache  # noqa: F401
 
 __all__ = [
     "User",
@@ -24,4 +25,5 @@ __all__ = [
     "CorpusWork",
     "WorkAuthor",
     "JournalQuartileHistory",
+    "InsightCache",
 ]

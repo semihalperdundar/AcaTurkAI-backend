@@ -31,10 +31,37 @@ Params = Mapping[str, Any]
 
 
 @dataclass(frozen=True)
+class InsightPack:
+    """Zengin yol (LLM icgorusu) icin tek cagri tanimi. Skoru ASLA etkilemez.
+
+    modules          : icgorunun ait oldugu kural modulleri (Insight.module bunlardan biri olmali)
+    sections         : LLM'e gidecek Context.sections kesitleri (sirali)
+    max_input_tokens : kesit butcesi (yaklasik; kirpma deterministik)
+    prompt_id        : istem sablonu + surumu, ornegin "claim_evidence@1" (onbellek anahtarina girer)
+    """
+
+    name: str
+    modules: tuple[str, ...]
+    sections: tuple[str, ...]
+    max_input_tokens: int
+    prompt_id: str
+
+
+CLAIM_EVIDENCE = InsightPack(
+    name="claim_evidence",
+    modules=("findings", "conclusions"),
+    sections=("results", "discussion", "conclusion"),
+    max_input_tokens=1000,
+    prompt_id="claim_evidence@1",
+)
+
+
+@dataclass(frozen=True)
 class DomainProfile:
     name: str
     weights: Mapping[str, float]
     params: Mapping[str, Params] = field(default_factory=dict)
+    insight_packs: tuple[InsightPack, ...] = ()
 
     def params_for(self, module: str) -> Params:
         """Salt okunur: bir modul parametreleri degistirip sonraki analizi etkileyemez."""
@@ -46,14 +73,23 @@ class DomainProfile:
         *,
         weights: Mapping[str, float] | None = None,
         params: Mapping[str, Params] | None = None,
+        insight_packs: tuple[InsightPack, ...] | None = None,
     ) -> "DomainProfile":
-        """Kalitim: yalnizca farki yaz. Modul icinde anahtar bazinda (sig) birlestirilir."""
+        """Kalitim: yalnizca farki yaz. Modul icinde anahtar bazinda (sig) birlestirilir.
+
+        insight_packs verilmezse ebeveynden miras alinir; verilirse listeyi tamamen degistirir.
+        """
         overrides = params or {}
         merged = {
             module: {**self.params.get(module, {}), **overrides.get(module, {})}
             for module in {*self.params, *overrides}
         }
-        return DomainProfile(name, MappingProxyType({**self.weights, **(weights or {})}), merged)
+        return DomainProfile(
+            name,
+            MappingProxyType({**self.weights, **(weights or {})}),
+            merged,
+            self.insight_packs if insight_packs is None else insight_packs,
+        )
 
 
 BASE = DomainProfile(
@@ -101,6 +137,7 @@ BASE = DomainProfile(
         "lexical": {},
         "delivery": {},
     },
+    insight_packs=(CLAIM_EVIDENCE,),
 )
 
 HEALTH = BASE.extend(

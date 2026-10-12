@@ -46,6 +46,23 @@ def run_analysis(analysis_id: str) -> dict:
         db.close()
 
 
+@celery_app.task(name="acaturkai.generate_insights")
+def generate_insights_task(analysis_id: str) -> dict:
+    """
+    Zengin yol (LLM icgorusu) - hizli yoldan (run_analysis) AYRI calisir; skoru degistirmez.
+    Henuz otomatik tetiklenmez: istemci su an MockInsightClient (INSIGHTS_PROVIDER=mock).
+    Gercek istemci eklenince run_analysis tamamlandiginda kuyruga alinacak.
+    """
+    from app.database import SessionLocal
+    from app.services.insights.service import generate_insights
+
+    db = SessionLocal()
+    try:
+        return generate_insights(db, analysis_id)
+    finally:
+        db.close()
+
+
 # --- Corpus toplama task'lari ---------------------------------------------
 # akademik_kutuphane_projesi.md modulunun entegrasyonu: OpenAlex harvest,
 # Unpaywall OA PDF indirme ve Scimago quartile import'u arka planda calisir

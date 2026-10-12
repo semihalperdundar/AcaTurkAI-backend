@@ -30,6 +30,7 @@ class Settings(BaseSettings):
 
     # AI
     ANTHROPIC_API_KEY: str | None = None
+    INSIGHTS_PROVIDER: str = "mock"  # zengin yol icgoru istemcisi; simdilik yalnizca "mock"
     OPENALEX_EMAIL: str | None = None
 
     # Storage
